@@ -171,13 +171,36 @@ class Server:
         return out
 
     def push_room(self, rid, p, skip=None):
-        """Push a message to every connection currently active in the room."""
-        for c in list(self.conns.values()):
-            if c.user and c.active_room == rid and c.user["id"] != skip:
-                try:
-                    c.push(p)
-                except Exception:
-                    pass
+        """Push to every member of the room that has a live session.
+
+        Members who only sit on the landing page are included on purpose: a kick,
+        an admin change or a timeout must show up on both sides in the same second
+        instead of after the next poll."""
+        for mrow in self.room_members(rid):
+            uid = mrow["user_id"]
+            if uid == skip:
+                continue
+            c = self.conns.get(uid)
+            if not c:
+                continue
+            try:
+                c.push(p)
+            except Exception:
+                pass
+
+    def push_state(self, rid, skip=None):
+        """The roster of one room, personalised for whoever receives it."""
+        for mrow in self.room_members(rid):
+            uid = mrow["user_id"]
+            if uid == skip:
+                continue
+            c = self.conns.get(uid)
+            if not c:
+                continue
+            try:
+                c.push({"t": "room_state", "room": self.room_json(rid, uid)})
+            except Exception:
+                pass
 
     def push_user(self, uid, p):
         c = self.conns.get(uid)
@@ -298,7 +321,7 @@ class Server:
         vip = make_vip(taken)
         self.db.run("INSERT INTO members(room_id,user_id,role,perms,vip,joined) VALUES(?,?,?,?,?,?)",
                     (r["id"], uid, "member", "{}", vip, time.time()))
-        self.push_room(r["id"], {"t": "room_state", "room": self.room_json(r["id"], None)})
+        self.push_state(r["id"])
         return {"t": "join_room", "ok": True, "room": self.room_json(r["id"], uid),
                 "invite": self.make_invite(r)}
 
@@ -325,7 +348,7 @@ class Server:
                 return {"t": "remove_room", "ok": True}
         if c.active_room == rid:
             c.active_room = None
-        self.push_room(rid, {"t": "room_state", "room": self.room_json(rid, None)})
+        self.push_state(rid)
         return {"t": "remove_room", "ok": True}
 
     # ---------------- moderation
@@ -347,7 +370,7 @@ class Server:
             tc.active_room = None
         if self.udp_users.get(target):
             self.udp_drop(target)
-        self.push_room(rid, {"t": "room_state", "room": self.room_json(rid, None)})
+        self.push_state(rid)
         log(f"kick: {tu['username']} out of room {rid} by {c.user['username']}")
         return {"t": "kick", "ok": True}
 
@@ -371,7 +394,7 @@ class Server:
             tc.active_room = None
         if self.udp_users.get(target):
             self.udp_drop(target)
-        self.push_room(rid, {"t": "room_state", "room": self.room_json(rid, None)})
+        self.push_state(rid)
         log(f"ban: user {target} from room {rid} by {c.user['username']} ({reason})")
         return {"t": "ban", "ok": True}
 
@@ -409,7 +432,7 @@ class Server:
         else:
             self.db.run("UPDATE members SET role='member', perms='{}' WHERE room_id=? AND user_id=?",
                         (rid, target))
-        self.push_room(rid, {"t": "room_state", "room": self.room_json(rid, None)})
+        self.push_state(rid)
         return {"t": "set_admin", "ok": True}
 
     def do_set_limit(self, c, m):
@@ -425,7 +448,7 @@ class Server:
         if len(self.room_members(rid)) > lim:
             return {"t": "set_limit", "ok": False, "err": "There are already more members than that"}
         self.db.run("UPDATE rooms SET member_limit=? WHERE id=?", (lim, rid))
-        self.push_room(rid, {"t": "room_state", "room": self.room_json(rid, None)})
+        self.push_state(rid)
         return {"t": "set_limit", "ok": True}
 
     # ---------------- friends
@@ -470,10 +493,11 @@ class Server:
             self.db.run("DELETE FROM freq WHERE from_id=? AND to_id=?", (tid, uid))
             self.db.run("INSERT OR IGNORE INTO friends(a,b) VALUES(?,?)", (*sorted((uid, tid)),))
             self.push_user(tid, {"t": "friend_upd", **self.friends_json(tid)})
-            return {"t": "add_friend", "ok": True, "accepted": True}
+            return {"t": "add_friend", "ok": True, "accepted": True, **self.friends_json(uid)}
         self.db.run("INSERT OR IGNORE INTO freq(from_id,to_id,ts) VALUES(?,?,?)", (uid, tid, time.time()))
+        self.push_user(tid, {"t": "friend_req", "from": c.user["username"]})
         self.push_user(tid, {"t": "friend_upd", **self.friends_json(tid)})
-        return {"t": "add_friend", "ok": True}
+        return {"t": "add_friend", "ok": True, **self.friends_json(uid)}
 
     def do_friend_resp(self, c, m):
         uid = c.user["id"]
@@ -487,7 +511,7 @@ class Server:
         if m.get("accept"):
             self.db.run("INSERT OR IGNORE INTO friends(a,b) VALUES(?,?)", (*sorted((uid, tid)),))
         self.push_user(tid, {"t": "friend_upd", **self.friends_json(tid)})
-        return {"t": "friend_resp", "ok": True}
+        return {"t": "friend_resp", "ok": True, **self.friends_json(uid)}
 
     def do_remove_friend(self, c, m):
         uid = c.user["id"]
@@ -496,8 +520,31 @@ class Server:
             return {"t": "remove_friend", "ok": False, "err": "No user with that name"}
         tid = target["id"]
         self.db.run("DELETE FROM friends WHERE (a=? AND b=?) OR (a=? AND b=?)", (uid, tid, tid, uid))
+        self.db.run("DELETE FROM freq WHERE (from_id=? AND to_id=?) OR (from_id=? AND to_id=?)",
+                    (uid, tid, tid, uid))
         self.push_user(tid, {"t": "friend_upd", **self.friends_json(tid)})
-        return {"t": "remove_friend", "ok": True}
+        return {"t": "remove_friend", "ok": True, **self.friends_json(uid)}
+
+    def do_pm(self, c, m):
+        """One private message between two friends, relayed through this server."""
+        uid = c.user["id"]
+        target = self.user_by_name((m.get("user") or "").strip())
+        if not target:
+            return {"t": "pm", "ok": False, "err": "No user with that name"}
+        tid = target["id"]
+        if not self.db.one("SELECT * FROM friends WHERE (a=? AND b=?) OR (a=? AND b=?)", (uid, tid, tid, uid)):
+            return {"t": "pm", "ok": False, "err": "You can write to a friend only"}
+        text = (m.get("text") or "").strip()[:1000]
+        if not text:
+            return {"t": "pm", "ok": False, "err": "Nothing to send"}
+        ts = time.time()
+        tc = self.conns.get(tid)
+        if tc:
+            try:
+                tc.push({"t": "pm", "from": c.user["username"], "text": text, "ts": ts})
+            except Exception:
+                tc = None
+        return {"t": "pm", "ok": True, "delivered": bool(tc), "ts": ts}
 
     def do_invite(self, c, m):
         uid = c.user["id"]
@@ -631,7 +678,7 @@ class Server:
                 log(f"member offline: {name} ({reason})")
                 self.push_room(rid, {"t": "member_offline", "room": rid, "user": uid,
                                      "name": name, "reason": reason}, skip=uid)
-                self.push_room(rid, {"t": "room_state", "room": self.room_json(rid, None)})
+                self.push_state(rid)
 
     # ---------------- TCP accept
     def other_instance(self):
@@ -795,7 +842,7 @@ class Conn:
         for f in self.srv.friends_json(uid)["friends"]:
             self.srv.push_user(f["id"], {"t": "friend_upd", **self.srv.friends_json(f["id"])})
         if rid:
-            self.srv.push_room(rid, {"t": "room_state", "room": self.srv.room_json(rid, None)})
+            self.srv.push_state(rid)
 
     def run(self):
         try:
@@ -855,6 +902,7 @@ class Conn:
                     "add_friend": lambda: s.do_add_friend(self, m),
                     "friend_resp": lambda: s.do_friend_resp(self, m),
                     "remove_friend": lambda: s.do_remove_friend(self, m),
+                    "pm": lambda: s.do_pm(self, m),
                     "invite": lambda: s.do_invite(self, m),
                 }
                 h = handlers.get(t)
@@ -881,13 +929,13 @@ class Conn:
         if not self.srv.member_row(rid, self.user["id"]):
             return {"t": "activate", "ok": False, "err": "You are not a member of that room"}
         self.active_room = rid
-        self.srv.push_room(rid, {"t": "room_state", "room": self.srv.room_json(rid, None)})
+        self.srv.push_state(rid)
         return {"t": "activate", "ok": True}
 
     def _do_deactivate(self, m=None):
         rid, self.active_room = self.active_room, None
         if rid:
-            self.srv.push_room(rid, {"t": "room_state", "room": self.srv.room_json(rid, None)})
+            self.srv.push_state(rid)
         return {"t": "deactivate", "ok": True}
 
     def _do_chat(self, m):

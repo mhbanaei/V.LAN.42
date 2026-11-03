@@ -35,7 +35,7 @@ except ImportError:
 APP_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 CFG_FILE = os.path.join(APP_DIR, "vlan42.json")
 IFACE = "V-Lan-42"
-APP_NAME = "V.Lan.42"
+APP_NAME = "V LAN 42"
 LOGO_FILE = "V.Lan.42.ico"
 GITHUB_URL = "https://github.com/mhbanaei"
 DEFAULT_PORT = 4242
@@ -323,11 +323,11 @@ def net_hint(ex):
         return ("\n  HINT: Windows blocked this connection (WinError 10013). Allow it in "
                 "Windows Firewall / your antivirus, then retry.")
     if "10061" in str(ex) or "refused" in str(ex).lower():
-        return "\n  HINT: the V.Lan.42 network is offline right now - please try again later."
+        return f"\n  HINT: the {APP_NAME} network is offline right now - please try again later."
     if "getaddrinfo" in str(ex).lower() or "11001" in str(ex) or "10065" in str(ex):
         return "\n  HINT: check your internet connection - the network could not be resolved."
     if "timed out" in str(ex).lower() or "timeout" in str(ex).lower():
-        return "\n  HINT: no answer from the V.Lan.42 network - check your internet connection."
+        return f"\n  HINT: no answer from the {APP_NAME} network - check your internet connection."
     return ""
 
 
@@ -472,7 +472,7 @@ class VpsLink:
             buf += chunk
         hello = json.loads(buf.split(b"\n", 1)[0].decode())
         if hello.get("t") != "hello":
-            raise OSError("this is not a V.Lan.42 server")
+            raise OSError(f"this is not a {APP_NAME} server")
         eph = X25519PrivateKey.generate()
         pub = eph.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
         shared = eph.exchange(X25519PublicKey.from_public_bytes(bytes.fromhex(hello["pub"])))
@@ -580,10 +580,10 @@ def open_link(log):
             link.connect()
             return link
         except Exception as ex:
-            log(f"V.Lan.42 network {host}:{port} unavailable: {ex}")
+            log(f"{APP_NAME} network {host}:{port} unavailable: {ex}")
             errs.append(str(ex))
             link.close()
-    raise OSError("\n".join(errs) or "the V.Lan.42 network is not configured yet")
+    raise OSError("\n".join(errs) or f"the {APP_NAME} network is not configured yet")
 
 
 # ----------------------------------------------------------------- active room session
@@ -1119,6 +1119,7 @@ class App(ctk.CTk):
         threading.excepthook = lambda a: self.q_put("THREAD ERROR:\n" + "".join(
             traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback)))
         self.logo_path = res_path(LOGO_FILE)
+        self.ico_file = None
         try:
             ico = self.logo_path
             if not ico:
@@ -1126,9 +1127,10 @@ class App(ctk.CTk):
                 if not os.path.exists(ico):
                     make_icon(ico)
             self.iconbitmap(ico)
+            self.ico_file = ico
         except Exception:
             pass
-        self.logo_img = None
+        self.logo_img = self.nav_logo = self.card_logo = None
         if self.logo_path:
             try:
                 from PIL import Image
@@ -1136,9 +1138,12 @@ class App(ctk.CTk):
                 im.size = max(im.info.get("sizes") or [im.size])
                 im.load()
                 im = im.convert("RGBA")
+                self.logo_pil = im
                 self.logo_img = ctk.CTkImage(light_image=im, dark_image=im, size=(84, 84))
+                self.nav_logo = ctk.CTkImage(light_image=im, dark_image=im, size=(26, 26))
+                self.card_logo = ctk.CTkImage(light_image=im, dark_image=im, size=(40, 40))
             except Exception:
-                self.logo_img = None
+                self.logo_img = self.nav_logo = self.card_logo = None
 
         self.link, self.node, self.busy, self.page = None, None, False, None
         self.q, self.cq, self.uq = queue.Queue(), queue.Queue(), queue.Queue()
@@ -1151,14 +1156,24 @@ class App(ctk.CTk):
         self.pending_enter = None       # room dict waiting for login
         self.role_key = None
         self.invite = None              # {"from","room","code","pwd"}
-        self.fwin = self.awin = self.bwin = None
+        self.awin = self.bwin = None
         self.rooms_t = 0.0
         self.entering_rid = None
+        self.tab = None                  # the tab the player opened
+        self.tabs = {}                   # key -> (holder frame, button, badge)
+        self.pages = {}
+        self.pms, self.pm_unread = {}, {}    # friend name -> thread / unread count
+        self.sel_friend = None
         cfg = load_cfg()
-        self.build_logwin()
+        self.body = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        self.build_nav()
         self.build_login(cfg)
         self.build_start(cfg)
+        self.build_friends()
+        self.build_logs()
         self.build_room()
+        self.pages = {"login": self.pg_login, "start": self.pg_start, "friends": self.pg_friends,
+                      "logs": self.pg_logs, "room": self.pg_room}
         self.show_page("login")
         self.after(1000, self.refresh)
         self.after(60, self.show_main)
@@ -1199,6 +1214,94 @@ class App(ctk.CTk):
                 pass
         self.after(1400, back)
 
+    def brand(self, win, title=""):
+        """Every window of the app carries the same name, icon and dark title bar."""
+        win.title(f"{APP_NAME} - {title}" if title else APP_NAME)
+        if self.ico_file:
+            try:
+                win.iconbitmap(self.ico_file)
+            except Exception:
+                pass
+        self.after(80, lambda: style_window(win))
+
+    def panel_head(self, parent, title):
+        """The branded header line used inside every panel."""
+        h = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=0, border_width=1, border_color=LINE)
+        h.pack(fill="x")
+        row = ctk.CTkFrame(h, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=10)
+        if self.card_logo:
+            ctk.CTkLabel(row, image=self.card_logo, text="").pack(side="left")
+        name = ctk.CTkFrame(row, fg_color="transparent")
+        name.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(name, text="V LAN", font=(FONT, 16, "bold"), text_color=TXT).pack(side="left")
+        ctk.CTkLabel(name, text="42", font=(FONT, 16, "bold"), text_color=ACC).pack(side="left", padx=(5, 0))
+        ctk.CTkLabel(row, text=title, font=(FONT, 13), text_color=MUTED).pack(side="right")
+        return h
+
+    # ------------------------------------------------------------ top navigation
+    def build_nav(self):
+        self.nav = ctk.CTkFrame(self, fg_color=CARD, corner_radius=0, height=54)
+        self.nav.pack(fill="x", side="top")
+        self.nav.pack_propagate(False)
+        row = ctk.CTkFrame(self.nav, fg_color="transparent")
+        row.pack(fill="both", expand=True, padx=16, pady=9)
+        if self.nav_logo:
+            ctk.CTkLabel(row, image=self.nav_logo, text="").pack(side="left")
+        nm = ctk.CTkFrame(row, fg_color="transparent")
+        nm.pack(side="left", padx=(9, 24))
+        ctk.CTkLabel(nm, text="V LAN", font=(FONT, 16, "bold"), text_color=TXT).pack(side="left")
+        ctk.CTkLabel(nm, text="42", font=(FONT, 16, "bold"), text_color=ACC).pack(side="left", padx=(5, 0))
+
+        for key, label in (("start", "Rooms"), ("friends", "Friends & Chat"),
+                           ("room", "Room"), ("logs", "Logs")):
+            holder = ctk.CTkFrame(row, fg_color="transparent")
+            holder.pack(side="left", padx=(0, 6))
+            b = ctk.CTkButton(holder, text=label, width=16 + 9 * len(label), height=32, corner_radius=8,
+                              font=(FONT, 13, "bold"), fg_color="transparent", hover_color=CARD2,
+                              text_color=MUTED, border_width=1, border_color=CARD,
+                              command=lambda k=key: self.select_tab(k))
+            b.pack(side="left")
+            badge = ctk.CTkLabel(holder, text="", font=(FONT, 11, "bold"), text_color="#0b1f12",
+                                 fg_color=ACC, corner_radius=9, width=22, height=20)
+            badge.pack(side="left", padx=(0, 2))
+            self.tabs[key] = (holder, b, badge)
+        self.tabs["room"][0].pack_forget()
+
+        self.btn(row, "Logout", self.logout, CARD2, LINE, h=30, width=80).pack(side="right")
+        self.lbl_nav_acct = ctk.CTkLabel(row, text="", font=(FONT, 12), text_color=MUTED)
+        self.lbl_nav_acct.pack(side="right", padx=(0, 14))
+
+    def select_tab(self, key):
+        if key == "room" and not self.node:
+            key = "start"
+        self.tab = key
+        self.show_page(key)
+
+    def update_tabs(self):
+        for key, (holder, b, _) in self.tabs.items():
+            if key == "room":
+                if self.node:
+                    holder.pack(side="left", padx=(0, 6), before=self.tabs["logs"][0])
+                else:
+                    holder.pack_forget()
+            sel = self.page == key
+            setw(b, fg_color=(CARD2 if sel else "transparent"),
+                 border_color=(ACC if sel else CARD),
+                 text_color=(TXT if sel else MUTED))
+        if self.node:
+            setw(self.tabs["room"][1], text=f"Room · {self.room_name}"[:24])
+
+    def update_badges(self):
+        """One number on the Friends tab: requests waiting plus unread chat lines."""
+        n = len(self.friends.get("requests", [])) + sum(self.pm_unread.values())
+        badge = self.tabs["friends"][2]
+        if n:
+            setw(badge, text=str(n) if n < 100 else "99+")
+            badge.pack(side="left", padx=(0, 2))
+        else:
+            setw(badge, text="")
+            badge.pack_forget()
     def show_main(self):
         style_window(self)
         self.fade_in()
@@ -1216,7 +1319,7 @@ class App(ctk.CTk):
 
     # ------------------------------------------------------------ login page
     def build_login(self, cfg):
-        self.pg_login = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        self.pg_login = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
         wrap = ctk.CTkFrame(self.pg_login, fg_color="transparent")
         wrap.pack(fill="both", expand=True)
         wrap.grid_columnconfigure(0, weight=1)
@@ -1284,7 +1387,7 @@ class App(ctk.CTk):
                 self.uq.put({"t": "auth_ok", "link": link, "remember": remember,
                              "server": f"{link.host}:{link.port}", "user": r["user"]["name"]})
             except Exception as ex:
-                self.uq.put({"t": "auth_fail", "err": f"Cannot reach the V.Lan.42 network: {ex}" + net_hint(ex)})
+                self.uq.put({"t": "auth_fail", "err": f"Cannot reach the {APP_NAME} network: {ex}" + net_hint(ex)})
         threading.Thread(target=work, daemon=True).start()
 
     def try_token_login(self):
@@ -1313,7 +1416,7 @@ class App(ctk.CTk):
 
     # ------------------------------------------------------------ landing page
     def build_start(self, cfg):
-        self.pg_start = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        self.pg_start = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
         side = ctk.CTkFrame(self.pg_start, fg_color=CARD, corner_radius=0, width=290)
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
@@ -1321,24 +1424,13 @@ class App(ctk.CTk):
             ctk.CTkLabel(side, image=self.logo_img, text="").pack(anchor="w", padx=26, pady=(30, 0))
         title = ctk.CTkFrame(side, fg_color="transparent")
         title.pack(anchor="w", padx=30, pady=(8, 0) if self.logo_img else (44, 0))
-        ctk.CTkLabel(title, text="V.Lan", font=(FONT, 32, "bold"), text_color=TXT).pack(side="left")
-        ctk.CTkLabel(title, text=".42", font=(FONT, 32, "bold"), text_color=ACC).pack(side="left")
+        ctk.CTkLabel(title, text="V LAN", font=(FONT, 32, "bold"), text_color=TXT).pack(side="left")
+        ctk.CTkLabel(title, text="42", font=(FONT, 32, "bold"), text_color=ACC).pack(side="left", padx=(8, 0))
         ctk.CTkLabel(side, text="Play together over a\nvirtual local network.", font=(FONT, 13),
                      text_color=MUTED, justify="left").pack(anchor="w", padx=30, pady=(8, 22))
-        for t in ("All traffic through your VPS", "Low, stable ping", "Rooms, friends, roles"):
-            r = ctk.CTkFrame(side, fg_color="transparent")
-            r.pack(anchor="w", padx=30, pady=3)
-            ctk.CTkLabel(r, text="●", text_color=ACC, font=(FONT, 10)).pack(side="left")
-            ctk.CTkLabel(r, text=t, text_color=TXT, font=(FONT, 13)).pack(side="left", padx=8)
         self.lbl_acct = ctk.CTkLabel(side, text="", font=(FONT, 12), text_color=MUTED, anchor="w",
                                      justify="left")
         self.lbl_acct.pack(anchor="w", padx=30, pady=(18, 0))
-        self.btn(side, "Logout", self.logout, CARD2, LINE, h=34, width=120).pack(
-            side="bottom", anchor="w", padx=30, pady=(0, 14))
-        self.btn(side, "Friends", self.show_friends, CARD2, LINE, h=34, width=120).pack(
-            side="bottom", anchor="w", padx=30, pady=(0, 8))
-        self.btn(side, "Logs", self.show_logs, CARD2, LINE, h=34, width=120).pack(
-            side="bottom", anchor="w", padx=30, pady=(0, 8))
         cr = ctk.CTkLabel(side, text="coded by Hossein & Erfan\ngithub.com/mhbanaei", font=(FONT, 11),
                           text_color=MUTED, justify="left", cursor="hand2")
         cr.pack(side="bottom", anchor="w", padx=30, pady=(0, 22))
@@ -1404,7 +1496,7 @@ class App(ctk.CTk):
 
     # ------------------------------------------------------------ room page
     def build_room(self):
-        self.pg_room = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
+        self.pg_room = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
         left = ctk.CTkFrame(self.pg_room, fg_color="transparent", width=380)
         left.pack(side="left", fill="y", padx=(16, 8), pady=16)
         left.pack_propagate(False)
@@ -1470,33 +1562,32 @@ class App(ctk.CTk):
         self.chat_in.pack(side="left", fill="x", expand=True)
         self.btn(crow, "Send", self.send_chat, h=40, width=80).pack(side="left", padx=(8, 0))
 
-    def build_logwin(self):
-        w = self.logwin = ctk.CTkToplevel(self)
-        w.title(f"{APP_NAME} - Logs")
-        w.geometry("680x440")
-        w.configure(fg_color=BG)
-        w.withdraw()
-        w.protocol("WM_DELETE_WINDOW", w.withdraw)
-        self.logbox = ctk.CTkTextbox(w, font=("Consolas", 11), wrap="word", fg_color=CARD, text_color=TXT)
+    def build_logs(self):
+        self.pg_logs = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
+        self.panel_head(self.pg_logs, "Logs")
+        self.logbox = ctk.CTkTextbox(self.pg_logs, font=("Consolas", 11), wrap="word",
+                                     fg_color=CARD, text_color=TXT, corner_radius=12)
         fix_clipboard(self.logbox)
-        self.logbox.pack(fill="both", expand=True, padx=12, pady=(12, 6))
+        self.logbox.pack(fill="both", expand=True, padx=16, pady=(12, 6))
         self.logbox.configure(state="disabled")
-        br = ctk.CTkFrame(w, fg_color="transparent")
-        br.pack(fill="x", padx=12, pady=(0, 12))
+        br = ctk.CTkFrame(self.pg_logs, fg_color="transparent")
+        br.pack(fill="x", padx=16, pady=(0, 14))
         for t, f in (("Copy log", self.copy_log), ("Save log", self.save_log),
                      ("Diagnostics", self.run_diag), ("Diag ZIP", self.export_zip)):
             self.btn(br, t, f, CARD2, LINE, h=32).pack(side="left", expand=True, fill="x", padx=3)
 
     def show_logs(self):
-        self.logwin.deiconify()
-        self.logwin.lift()
-        self.logwin.focus()
-        self.after(80, lambda: style_window(self.logwin))
+        self.select_tab("logs")
 
     # ------------------------------------------------------------ pages
     def show_page(self, name):
-        for pg in (self.pg_login, self.pg_start, self.pg_room):
+        for pg in self.pages.values():
             pg.pack_forget()
+        if name == "login":
+            self.nav.pack_forget()
+        else:
+            self.nav.pack(fill="x", side="top", before=self.body)
+        self.body.pack(fill="both", expand=True)
         if name == "room":
             role = (self.node.room.get("my_role") if self.node else None) or "member"
             badge, color = ROLE_BADGE.get(role, ROLE_BADGE["member"])
@@ -1508,12 +1599,12 @@ class App(ctk.CTk):
             self.row_host.pack(fill="x", pady=(0, 6), before=self.row_common)
             if role in ("owner", "admin"):
                 self.row_mod.pack(fill="x", pady=(0, 6), before=self.row_common)
-            self.pg_room.pack(fill="both", expand=True)
-        elif name == "start":
-            self.pg_start.pack(fill="both", expand=True)
-        else:
-            self.pg_login.pack(fill="both", expand=True)
+        self.pages.get(name, self.pages["login"]).pack(fill="both", expand=True)
         self.page = name
+        self.update_tabs()
+        if name == "friends":
+            self.pm_show()
+            self.rebuild_friends()
 
     # ------------------------------------------------------------ auth events
     def on_auth_ok(self, ev):
@@ -1528,7 +1619,9 @@ class App(ctk.CTk):
         self.busy = False
         self.b_auth.configure(text="Sign in", state="normal")
         self.lbl_login_err.configure(text="")
-        setw(self.lbl_acct, text=f"signed in as {self.my_name}\nV.Lan.42 network online")
+        setw(self.lbl_nav_acct, text=self.my_name)
+        setw(self.lbl_acct, text=f"signed in as {self.my_name}\n{APP_NAME} network online")
+        self.tab = "start"
         self.show_page("start")
         self.q_put(f"Logged in as {self.my_name} (server {ev['server']})")
         self.refresh_rooms()
@@ -1557,13 +1650,17 @@ class App(ctk.CTk):
         save_cfg(cfg)
         self.rows = {}
         self.clear_rooms()
-        for w in (self.fwin, self.awin, self.bwin):
+        self.tab = None
+        self.pms, self.pm_unread, self.sel_friend = {}, {}, None
+        self.friends = {"friends": [], "requests": []}
+        self.rebuild_friends()
+        for w in (self.awin, self.bwin):
             if w:
                 try:
                     w.destroy()
                 except Exception:
                     pass
-        self.fwin = self.awin = self.bwin = None
+        self.awin = self.bwin = None
         self.show_page("login")
 
     # ------------------------------------------------------------ rooms (landing)
@@ -1772,6 +1869,7 @@ class App(ctk.CTk):
         node.update_state(room)
         self.chat_clear()
         self.node, self.busy, self.entering_rid = node, True, room.get("id")
+        self.tab = "room"
 
         def go():
             try:
@@ -1780,11 +1878,13 @@ class App(ctk.CTk):
                 self.q.put(f"ERROR: {ex}")
                 self.need_wintun = True
                 self.node = None
+                self.tab = "start"
                 self.cleanup(node)
             except Exception as ex:
                 self.q.put(f"ERROR: {ex}\n{traceback.format_exc()}")
                 self.err = f"Could not start: {str(ex)[:160]}"
                 self.node = None
+                self.tab = "start"
                 self.cleanup(node)
             self.busy = False
             self.entering_rid = None
@@ -1795,6 +1895,8 @@ class App(ctk.CTk):
             return
         node, self.node, self.busy = self.node, None, True
         self.role_key = None
+        if self.tab in (None, "room"):     # whoever left from Friends or Logs stays there
+            self.tab = "start"
 
         def stop():
             node.stop()
@@ -1849,8 +1951,9 @@ class App(ctk.CTk):
         qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white").get_image().convert("RGB")
         top = ctk.CTkToplevel(self)
-        top.title("Invite QR")
         top.configure(fg_color=CARD)
+        self.brand(top, "Invite QR")
+        self.panel_head(top, "Invite QR")
         photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
         lbl = ctk.CTkLabel(top, image=photo, text="")
         lbl.image = photo
@@ -1901,10 +2004,10 @@ class App(ctk.CTk):
             self.awin.deiconify()
             return
         w = self.awin = ctk.CTkToplevel(self)
-        w.title(f"{APP_NAME} - Admin panel")
         w.geometry("560x560")
         w.configure(fg_color=BG)
-        self.after(80, lambda: style_window(w))
+        self.brand(w, "Admin panel")
+        self.panel_head(w, "Roles and permissions")
         self.admin_body = ctk.CTkScrollableFrame(w, fg_color="transparent")
         self.admin_body.pack(fill="both", expand=True, padx=12, pady=12)
         self.rebuild_admin()
@@ -1997,10 +2100,10 @@ class App(ctk.CTk):
             self.bwin.deiconify()
             return
         w = self.bwin = ctk.CTkToplevel(self)
-        w.title(f"{APP_NAME} - Bans")
         w.geometry("520x400")
         w.configure(fg_color=BG)
-        self.after(80, lambda: style_window(w))
+        self.brand(w, "Bans")
+        self.panel_head(w, "Banned from this room")
         self.ban_body = ctk.CTkScrollableFrame(w, fg_color="transparent")
         self.ban_body.pack(fill="both", expand=True, padx=12, pady=12)
         rid = self.node.rid if self.node else None
@@ -2049,27 +2152,52 @@ class App(ctk.CTk):
                 self.btn(r, "Unban", unban, CARD2, LINE, h=30, width=80).pack(side="right", padx=12, pady=8)
 
     # ------------------------------------------------------------ friends
-    def show_friends(self):
-        if self.fwin and self.fwin.winfo_exists():
-            self.fwin.deiconify()
-            return
-        w = self.fwin = ctk.CTkToplevel(self)
-        w.title(f"{APP_NAME} - Friends")
-        w.geometry("460x620")
-        w.configure(fg_color=BG)
-        self.after(80, lambda: style_window(w))
-        top = ctk.CTkFrame(w, fg_color=CARD, corner_radius=12, border_width=1, border_color=LINE)
-        top.pack(fill="x", padx=12, pady=(12, 6))
-        self.fr_search = self.entry(top, "Search username...")
-        self.fr_search.pack(side="left", fill="x", expand=True, padx=(12, 8), pady=12)
+    def build_friends(self):
+        self.pg_friends = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
+        self.panel_head(self.pg_friends, "Friends & Chat")
+        cols = ctk.CTkFrame(self.pg_friends, fg_color="transparent")
+        cols.pack(fill="both", expand=True, padx=16, pady=(10, 14))
+        cols.grid_columnconfigure(0, minsize=330)
+        cols.grid_columnconfigure(1, weight=1)
+        cols.grid_rowconfigure(0, weight=1)
+
+        left = ctk.CTkFrame(cols, fg_color=CARD, corner_radius=14, border_width=1, border_color=LINE)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        li = ctk.CTkFrame(left, fg_color="transparent")
+        li.pack(fill="both", expand=True, padx=12, pady=12)
+        sr = ctk.CTkFrame(li, fg_color="transparent")
+        sr.pack(fill="x")
+        self.fr_search = self.entry(sr, "Search username...")
+        self.fr_search.pack(side="left", fill="x", expand=True)
         self.fr_search.bind("<Return>", lambda e: self.do_search())
-        self.btn(top, "Search", self.do_search, CARD2, LINE, h=36, width=80).pack(side="right", padx=(0, 12))
-        self.fr_results = ctk.CTkFrame(w, fg_color="transparent", height=110)
-        self.fr_results.pack(fill="x", padx=12, pady=6)
-        self.fr_body = ctk.CTkScrollableFrame(w, fg_color="transparent")
-        self.fr_body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self.rebuild_friends()
-        self.refresh_friends()
+        self.btn(sr, "Search", self.do_search, CARD2, LINE, h=40, width=76).pack(side="left", padx=(8, 0))
+        self.fr_results = ctk.CTkFrame(li, fg_color="transparent")
+        self.fr_results.pack(fill="x", pady=(4, 0))
+        self.fr_body = ctk.CTkScrollableFrame(li, fg_color="transparent")
+        self.fr_body.pack(fill="both", expand=True, pady=(4, 0))
+
+        right = ctk.CTkFrame(cols, fg_color=CARD, corner_radius=14, border_width=1, border_color=LINE)
+        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        hh = ctk.CTkFrame(right, fg_color="transparent")
+        hh.pack(fill="x", padx=16, pady=(12, 4))
+        self.pm_title = ctk.CTkLabel(hh, text="No chat open", font=(FONT, 15, "bold"))
+        self.pm_title.pack(side="left")
+        self.pm_state = ctk.CTkLabel(hh, text="", font=(FONT, 12), text_color=MUTED)
+        self.pm_state.pack(side="right")
+        self.pm_box = ctk.CTkTextbox(right, font=(FONT, 13), wrap="word", fg_color=BG, text_color=TXT,
+                                     corner_radius=10, border_width=1, border_color=LINE)
+        fix_clipboard(self.pm_box)
+        self.pm_box.pack(fill="both", expand=True, padx=14)
+        for tag, kw in (("me", {"foreground": ACC}), ("them", {"foreground": "#5dade2"}),
+                        ("sys", {"foreground": GRAY}), ("body", {"foreground": TXT}),
+                        ("rtl", {"justify": "right"}), ("ltr", {"justify": "left"})):
+            self.pm_box.tag_config(tag, **kw)
+        self.pm_box.configure(state="disabled")
+        crow = ctk.CTkFrame(right, fg_color="transparent")
+        crow.pack(fill="x", padx=14, pady=12)
+        self.pm_in = TextLine(crow, "Type a message...", on_enter=self.send_pm)
+        self.pm_in.pack(side="left", fill="x", expand=True)
+        self.btn(crow, "Send", self.send_pm, h=40, width=80).pack(side="left", padx=(8, 0))
 
     def refresh_friends(self):
         if not (self.link and self.link.alive):
@@ -2092,8 +2220,6 @@ class App(ctk.CTk):
         threading.Thread(target=work, daemon=True).start()
 
     def show_search_results(self, users):
-        if not (self.fwin and self.fwin.winfo_exists()):
-            return
         for c in self.fr_results.winfo_children():
             c.destroy()
         if not users:
@@ -2106,62 +2232,126 @@ class App(ctk.CTk):
             ctk.CTkLabel(r, text=u["name"], font=(FONT, 13), anchor="w").pack(side="left", padx=12, pady=6)
 
             def add(q=u["name"]):
-
-                def work():
-                    rr = self.link.req("add_friend", user=q)
-                    if not rr.get("ok"):
-                        self.q_put(f"Add friend failed: {rr.get('err')}")
-                threading.Thread(target=work, daemon=True).start()
+                self.friend_req(q, "add_friend")
             self.btn(r, "Add", add, CARD2, LINE, h=28, width=64).pack(side="right", padx=10, pady=5)
 
+    def friend_apply(self, r):
+        """A friend action carries the fresh list of whoever did it: show it at once."""
+        if "friends" in r:
+            self.friends = {"friends": r.get("friends", []), "requests": r.get("requests", [])}
+            self.rebuild_friends()
+
+    def friend_req(self, name, cmd, **kw):
+        """add_friend / friend_resp / remove_friend, then apply the answer immediately."""
+        def work():
+            r = self.link.req(cmd, user=name, **kw)
+            if not r.get("ok"):
+                self.q_put(f"{cmd.replace('_', ' ')} failed: {r.get('err')}")
+                return
+            self.friend_apply(r)
+            if cmd == "add_friend" and r.get("accepted"):
+                self.q_put(f"{name} is now your friend")
+        threading.Thread(target=work, daemon=True).start()
+
     def rebuild_friends(self):
-        if not (self.fwin and self.fwin.winfo_exists()):
+        if not (self.fr_body and self.fr_body.winfo_exists()):
             return
         for c in self.fr_body.winfo_children():
             c.destroy()
         fdata = self.friends
         if fdata.get("requests"):
-            self.cap(self.fr_body, "Friend requests")
+            self.cap(self.fr_body, f"Friend requests ({len(fdata['requests'])})")
             for rq in fdata["requests"]:
-                r = ctk.CTkFrame(self.fr_body, fg_color=CARD, corner_radius=10)
+                r = ctk.CTkFrame(self.fr_body, fg_color=CARD, corner_radius=10,
+                                 border_width=1, border_color=YELLOW)
                 r.pack(fill="x", pady=3)
                 ctk.CTkLabel(r, text=rq["name"], font=(FONT, 13, "bold"), anchor="w").pack(side="left", padx=12)
-                self.btn(r, "✕", lambda q=rq["name"]: self.friend_resp(q, False), CARD2, LINE,
-                         h=28, width=40).pack(side="right", padx=4)
-                self.btn(r, "Accept", lambda q=rq["name"]: self.friend_resp(q, True), h=28, width=80
-                         ).pack(side="right", padx=4)
+                self.btn(r, "✕", lambda q=rq["name"]: self.friend_req(q, "friend_resp", accept=False),
+                         CARD2, LINE, h=28, width=40).pack(side="right", padx=4)
+                self.btn(r, "Accept", lambda q=rq["name"]: self.friend_req(q, "friend_resp", accept=True),
+                         h=28, width=80).pack(side="right", padx=4)
         self.cap(self.fr_body, f"Friends ({len(fdata.get('friends', []))})")
         if not fdata.get("friends"):
             ctk.CTkLabel(self.fr_body, text="No friends yet - search a username above.", font=(FONT, 12),
                          text_color=MUTED).pack(pady=8)
         for f in fdata.get("friends", []):
-            r = ctk.CTkFrame(self.fr_body, fg_color=CARD, corner_radius=10)
+            picked = f["name"] == self.sel_friend
+            r = ctk.CTkFrame(self.fr_body, fg_color=CARD, corner_radius=10,
+                             border_width=1, border_color=(ACC if picked else LINE))
             r.pack(fill="x", pady=3)
-            dot_color = GREEN if f.get("online") else GRAY
-            ctk.CTkLabel(r, text="●", text_color=dot_color, font=(FONT, 12)).pack(side="left", padx=(12, 4))
+            ctk.CTkLabel(r, text="●", text_color=(GREEN if f.get("online") else GRAY),
+                         font=(FONT, 12)).pack(side="left", padx=(12, 4))
             ctk.CTkLabel(r, text=f["name"] + ("  (online)" if f.get("online") else ""),
                          font=(FONT, 13), anchor="w").pack(side="left", padx=2)
-            self.btn(r, "✕", lambda q=f["name"]: self.remove_friend(q), CARD2, LINE,
+            self.btn(r, "✕", lambda q=f["name"]: self.friend_req(q, "remove_friend"), CARD2, LINE,
                      h=28, width=40).pack(side="right", padx=4)
             if self.node:
                 self.btn(r, "Invite", lambda q=f["name"]: self.invite_friend(q), CARD2, LINE,
-                         h=28, width=80).pack(side="right", padx=4)
+                         h=28, width=70).pack(side="right", padx=4)
+            unread = self.pm_unread.get(f["name"], 0)
+            self.btn(r, f"Chat ({unread})" if unread else "Chat",
+                     lambda q=f["name"]: self.open_pm(q), CARD2, LINE, h=28, width=76
+                     ).pack(side="right", padx=4)
+        self.update_badges()
 
-    def friend_resp(self, name, accept):
+    # ------------------------------------------------------------ friend to friend chat
+    def open_pm(self, name):
+        self.sel_friend = name
+        self.pm_unread.pop(name, None)
+        self.rebuild_friends()
+        self.pm_show()
+
+    def pm_show(self):
+        if not (self.pm_box and self.pm_box.winfo_exists()):
+            return
+        name = self.sel_friend
+        self.pm_box.configure(state="normal")
+        self.pm_box.delete("1.0", "end")
+        if not name:
+            setw(self.pm_title, text="No chat open")
+            setw(self.pm_state, text="pick a friend on the left")
+            self.pm_box.configure(state="disabled")
+            return
+        if self.page == "friends":
+            self.pm_unread.pop(name, None)      # looking at it now, so it is not waiting anymore
+        f = next((x for x in self.friends.get("friends", []) if x["name"] == name), None)
+        setw(self.pm_title, text=name)
+        setw(self.pm_state, text="online" if f and f.get("online") else "offline")
+        for who, text, ts in self.pms.get(name, []):
+            self.chat_add(who, text, "me" if who == "You" else "them", ts, box=self.pm_box)
+        self.pm_box.configure(state="disabled")
+
+    def pm_add(self, name, who, text, ts=None, mine=False):
+        self.pms.setdefault(name, []).append((who, text, ts))
+        if name == self.sel_friend and self.page == "friends":
+            self.chat_add(who, text, "me" if mine else "them", ts, box=self.pm_box)
+            return
+        if not mine:            # nobody is looking at it: count it on the tab and on the row
+            self.pm_unread[name] = self.pm_unread.get(name, 0) + 1
+            self.rebuild_friends()
+            self.beep()
+
+    def send_pm(self):
+        txt, name = self.pm_in.value(), self.sel_friend
+        if not txt or not name or not (self.link and self.link.alive):
+            return
+        self.pm_in.set("")
 
         def work():
-            r = self.link.req("friend_resp", user=name, accept=accept)
-            if not r.get("ok"):
-                self.q_put(f"Friend response failed: {r.get('err')}")
+            r = self.link.req("pm", user=name, text=txt)
+            if r.get("ok"):
+                self.uq.put({"t": "pm_own", "to": name, "text": txt, "ts": r.get("ts"),
+                             "delivered": r.get("delivered")})
+            else:
+                self.uq.put({"t": "pm_err", "err": r.get("err") or "could not send"})
         threading.Thread(target=work, daemon=True).start()
 
-    def remove_friend(self, name):
-
-        def work():
-            r = self.link.req("remove_friend", user=name)
-            if not r.get("ok"):
-                self.q.put(f"Remove friend failed: {r.get('err')}")
-        threading.Thread(target=work, daemon=True).start()
+    def beep(self):
+        if winsound:
+            try:
+                winsound.MessageBeep(-1)
+            except Exception:
+                pass
 
     def invite_friend(self, name):
         if not self.node:
@@ -2181,15 +2371,16 @@ class App(ctk.CTk):
         self.chatbox.delete("1.0", "end")
         self.chatbox.configure(state="disabled")
 
-    def chat_add(self, who, text, tag, ts=None):
+    def chat_add(self, who, text, tag, ts=None, box=None):
+        box = box or self.chatbox
         stamp = time.strftime("%H:%M", time.localtime(ts or time.time()))
         rtl = has_rtl(text)
         j = "rtl" if rtl else "ltr"
-        self.chatbox.configure(state="normal")
-        self.chatbox.insert("end", f"{who}  {stamp}\n", (tag, j))
-        self.chatbox.insert("end", (f"\u200f{text}\u200f" if rtl else text) + "\n\n", ("body", j))
-        self.chatbox.see("end")
-        self.chatbox.configure(state="disabled")
+        box.configure(state="normal")
+        box.insert("end", f"{who}  {stamp}\n", (tag, j))
+        box.insert("end", (f"\u200f{text}\u200f" if rtl else text) + "\n\n", ("body", j))
+        box.see("end")
+        box.configure(state="disabled")
 
     def send_chat(self):
         txt = self.chat_in.value()
@@ -2316,21 +2507,21 @@ class App(ctk.CTk):
         while not self.cq.empty():
             nm, tx, ts = self.cq.get()
             self.chat_add(nm, tx, "them", ts)
-            if winsound:
-                try:
-                    winsound.MessageBeep(-1)
-                except Exception:
-                    pass
+            self.beep()
         while not self.uq.empty():
             self.on_event(self.uq.get_nowait())
         n = self.node
-        want = "room" if (n and n.running and not self.busy) else \
-            ("start" if self.link else "login")
+        if not self.link:
+            want = "login"
+        else:
+            want = self.tab or ("room" if n else "start")
+            if want == "room" and not n:
+                want = "start"
         if want != self.page:
             self.show_page(want)
-        if want == "room":
+        if n:
             self.update_room(n)
-        elif want == "start":
+        if want == "start":
             self.update_start()
         else:
             if self.busy:
@@ -2350,24 +2541,37 @@ class App(ctk.CTk):
             self.enter_room(ev["room"])
         elif t == "room_state":
             room = ev.get("room")
-            if room and self.node and room["id"] == self.node.rid:
+            if not room:
+                return
+            if self.node and room["id"] == self.node.rid:
                 self.node.update_state(room)
                 self.room_name = room["name"]
                 self.update_room_rows()
                 if self.awin and self.awin.winfo_exists():
                     self.rebuild_admin()
+            for i, r in enumerate(self.my_rooms):
+                # a member who never entered the room must still see the roster change now
+                if r.get("id") == room["id"]:
+                    self.my_rooms[i] = room
+                    self.on_my_rooms(self.my_rooms)
+                    break
         elif t == "chat":
             if self.node and ev.get("room") == self.node.rid \
                     and ev.get("from") != self.my_name:
                 self.cq.put((ev.get("from", "?"), ev.get("text", ""), ev.get("ts")))
         elif t == "kicked":
             if self.node and ev.get("room") == self.node.rid:
+                self.q_put(f"You were kicked from the room by {ev.get('by')}")
                 self.chat_add("system", f"You were kicked by {ev.get('by')}.", "sys")
+                self.tab = "start"
                 self.leave()
                 self.refresh_rooms()
         elif t == "banned":
             if self.node and ev.get("room") == self.node.rid:
+                self.q_put(f"You were banned from the room by {ev.get('by')} "
+                           f"({ev.get('reason') or 'no reason'})")
                 self.chat_add("system", f"You were banned by {ev.get('by')} ({ev.get('reason') or 'no reason'}).", "sys")
+                self.tab = "start"
                 self.leave()
                 self.refresh_rooms()
         elif t == "member_offline":
@@ -2379,6 +2583,19 @@ class App(ctk.CTk):
         elif t == "friend_upd":
             self.friends = {"friends": ev.get("friends", []), "requests": ev.get("requests", [])}
             self.rebuild_friends()
+            if self.page == "friends":
+                self.pm_show()
+        elif t == "friend_req":
+            self.q_put(f"{ev.get('from')} sent you a friend request")
+            self.refresh_friends()
+        elif t == "pm":
+            self.pm_add(ev.get("from", "?"), ev.get("from", "?"), ev.get("text", ""), ev.get("ts"))
+        elif t == "pm_own":
+            self.pm_add(ev["to"], "You", ev["text"], ev.get("ts"), mine=True)
+            if not ev.get("delivered"):
+                self.q_put(f"{ev['to']} is not online - your message was not delivered")
+        elif t == "pm_err":
+            self.q_put(f"Chat failed: {ev.get('err')}")
         elif t == "search":
             self.show_search_results(ev.get("users", []))
         elif t == "ban_list":
@@ -2423,7 +2640,7 @@ class App(ctk.CTk):
         elif self.err:
             setw(self.lbl_acct, text=self.err, text_color=RED)
         else:
-            setw(self.lbl_acct, text=f"signed in as {self.my_name}\nV.Lan.42 network online",
+            setw(self.lbl_acct, text=f"signed in as {self.my_name}\n{APP_NAME} network online",
                  text_color=MUTED)
         for b, t, in ((self.b_create, "Create room"), (self.b_join, "Join room")):
             setw(b, text=t, state="normal")
