@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """V.Lan.42 connection self-check.
 
-    python vlan42_check.py                     # uses vlan42_servers.txt
+    python vlan42_check.py                     # vlan42_servers.txt, else v42.ir
     python vlan42_check.py 203.0.113.10        # one address
     python vlan42_check.py 203.0.113.10:4242
 
@@ -18,11 +18,12 @@ import time
 
 APP_NAME = "V.Lan.42"
 PORT = 4242
+DEFAULT_HOST = "v42.ir"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def targets():
-    """Addresses to test: command line wins, then vlan42_servers.txt next to this file."""
+    """Addresses to test: command line wins, then vlan42_servers.txt, then the default v42.ir."""
     out = []
     for arg in sys.argv[1:]:
         arg = arg.strip()
@@ -42,6 +43,8 @@ def targets():
                         out.append((host, int(port)) if sep and port.isdigit() else (line, PORT))
         except OSError:
             pass
+    if not out:
+        out.append((DEFAULT_HOST, PORT))
     return out
 
 

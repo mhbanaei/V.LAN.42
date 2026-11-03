@@ -174,6 +174,21 @@ class TClient:
             dst.settimeout(old)
 
 
+
+def join(c, host, code, pwd):
+    """The guest knocks with the room password and the host lets them in - the same
+    two steps the app's accept card performs. Returns the join answer, with the room
+    dict in it once they are inside."""
+    r = c.req("join_room", code=code, pwd=pwd)
+    if r.get("ok") and r.get("pending"):
+        ok = host.req("join_resp", room=r["room"], user=c.user["id"], accept=True).get("ok")
+        if not ok:
+            return {"t": "join_room", "ok": False, "err": "the host did not answer"}
+        st = c.drain_push("room_state", timeout=6)
+        r = {"t": "join_room", "ok": st is not None, "room": (st or {}).get("room"),
+             "pending": False}
+    return r
+
 def main():
     a = TClient("alice")
     r = a.req("register", u="alice", p="pw123")
@@ -216,10 +231,25 @@ def main():
     r = b.req("join_room", code=code, pwd="nope")
     check("join rejects wrong password", not r.get("ok"))
 
-    # join
+    # join: the password opens the door, but the host still has to say yes
     r = b.req("join_room", code=code, pwd=pwd)
+    check("a new face is held at the door", r.get("ok") and r.get("pending"), str(r))
+    knock = a.drain_push("jreq", timeout=6)
+    check("the host is told who knocked",
+          knock and knock["from"] == "bob" and knock["user"] == b.user["id"], str(knock))
+    q = a.req("join_list", room=rid)
+    check("the host can read the queue", q.get("ok") and len(q.get("requests", [])) == 1, str(q))
+    check("the guest is not a member yet",
+          not any(m["name"] == "bob" for m in a.req("my_rooms")["rooms"][0]["members"]), "")
+    check("the host lets bob in", a.req("join_resp", room=rid, user=b.user["id"],
+                                       accept=True).get("ok"))
+    check("the guest is told they are in", b.drain_push("join_ok", timeout=6) is not None)
+    st = b.drain_push("room_state", timeout=6)
+    r = {"ok": st is not None, "room": (st or {}).get("room")}
     check("bob joins", r.get("ok"), str(r))
-    check("guest vip assigned", r["room"]["members"][1]["vip"].startswith("10.77."), r["room"]["members"][1]["vip"])
+    check("guest vip assigned", r["room"]["members"][1]["vip"].startswith("10.77."),
+          r["room"]["members"][1]["vip"])
+    check("the queue is empty again", len(a.req("join_list", room=rid).get("requests", [])) == 0)
 
     # activate both + UDP
     check("alice activate", a.req("activate", room=rid).get("ok"))
@@ -285,14 +315,14 @@ def main():
     r = cc.req("register", u="carol", p="pw123")
     cc.token = r["token"]
     cc.user = r["user"]
-    check("carol joins", cc.req("join_room", code=code, pwd=pwd).get("ok"))
+    check("carol joins", join(cc, a, code, pwd).get("ok"))
     r = b.req("kick", room=rid, user=cc.user["id"])
     check("admin bob kicks carol", r.get("ok"), str(r))
     kicked = cc.drain_push("kicked")
     check("carol receives kicked push", kicked is not None)
 
     # ban
-    check("carol rejoins", cc.req("join_room", code=code, pwd=pwd).get("ok"))
+    check("carol rejoins after a kick", join(cc, a, code, pwd).get("ok"))
     r = b.req("ban", room=rid, user=cc.user["id"], reason="cheating")
     check("admin bob bans carol", r.get("ok"), str(r))
     r = cc.req("join_room", code=code, pwd=pwd)
@@ -301,7 +331,7 @@ def main():
     check("ban list shows carol", r.get("ok") and any(x["name"] == "carol" for x in r.get("bans", [])))
     r = b.req("unban", room=rid, user=cc.user["id"])
     check("admin bob unbans carol", r.get("ok"), str(r))
-    check("carol can rejoin after unban", cc.req("join_room", code=code, pwd=pwd).get("ok"))
+    check("carol can rejoin after unban", join(cc, a, code, pwd).get("ok"))
 
     # member without perms cannot kick
     r = cc.req("kick", room=rid, user=uid_b)
@@ -322,7 +352,7 @@ def main():
     check("room full blocks join", not r.get("ok"), str(r))
     r = a.req("set_limit", room=rid, limit=16)
     check("owner raises limit", r.get("ok"))
-    check("erin joins after limit raised", dd.req("join_room", code=code, pwd=pwd).get("ok"))
+    check("erin joins after limit raised", join(dd, a, code, pwd).get("ok"))
 
     # 3-room cap
     r = a.req("create_room", name="room two", pwd="roompw2")

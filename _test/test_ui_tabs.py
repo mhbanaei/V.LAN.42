@@ -28,6 +28,7 @@ class FakeLink:
     def __init__(self):
         self.alive, self.sent = True, []
         self.delivered = True
+        self.user = {"id": 7, "username": "042"}
         self.friends_payload = {"friends": [], "requests": []}
 
     def req(self, t, **kw):
@@ -47,10 +48,15 @@ class FakeLink:
     def close(self):
         self.alive = False
 
+    def notify_server(self, t, **kw):
+        if self.alive:
+            self.sent.append((t, kw))
+
 
 class FakeNode:
     def __init__(self, rid=5, name="war room", role="owner"):
         self.rid, self.vip, self.running = rid, "10.77.0.7", True
+        self.tx = self.rx = 0
         self.room = {"id": rid, "name": name, "my_role": role, "members": []}
         self.peers = {}
 
@@ -132,7 +138,9 @@ def main():
           images(app.pg_login) and images(app.nav))
     check("logo on the friends and logs headers",
           images(app.pg_friends) and images(app.pg_logs))
-    check("wordmark split in two colours", "V LAN" in labels(app.pg_start) and "42" in labels(app.pg_start))
+    check("wordmark is VLAN + picture + 42",
+          {"VLAN", "42"} <= set(labels(app.pg_start)) <= {"VLAN", "42", "|"} | set(labels(app.pg_start))
+          and {"VLAN", "42"} <= set(labels(app.nav)))
     old = [t for w in (app.pg_start, app.pg_login, app.pg_friends, app.pg_logs, app.pg_room)
            for t in labels(w) if "V.Lan.42" in t]
     check("no panel still says V.Lan.42", not old, str(old))
@@ -147,7 +155,11 @@ def main():
 
     # 3. the bar carries the tabs, and Room only exists while inside a room
     check("tabs in order", [b.cget("text") for (_, b, _) in app.tabs.values()]
-          == ["Rooms", "Friends & Chat", "Room", "Logs"])
+          == ["Rooms", "Friends", "Room", "Logs", "Settings"],
+          str([b.cget("text") for (_, b, _) in app.tabs.values()]))
+    sep = [t for t in labels(app.nav) if t == "|"]
+    check("tabs split by green bars, never painted green", len(sep) == 4
+          and app.tabs["start"][1].cget("fg_color") == "transparent", str(sep))
     check("no Logs/Friends/Logout buttons left on the page",
           not [b for b in buttons(app.pg_start)
                if b.cget("text") in ("Logs", "Friends", "Logout")])
@@ -177,8 +189,10 @@ def main():
           and app.pg_friends.winfo_manager() == "pack" and app.pg_start.winfo_manager() == "")
     got = [b.cget("text") for b in buttons(app.fr_body)]
     check("request offers Accept and Ignore", "Accept" in got and "✕" in got, str(got))
-    check("only the open tab looks selected", app.tabs["friends"][1].cget("border_color") == vp.ACC
-          and app.tabs["start"][1].cget("border_color") == vp.CARD)
+    check("only the open tab looks selected",
+          app.tabs["friends"][1].cget("fg_color") == vp.CARD2
+          and app.tabs["friends"][1].cget("border_color") != vp.ACC
+          and app.tabs["start"][1].cget("fg_color") == "transparent")
 
     # 7. accepting updates this side at once, from the answer alone
     app.friend_apply({"ok": True, "friends": [dict(sara, online=True)], "requests": []})
@@ -191,8 +205,11 @@ def main():
     app.on_event({"t": "pm", "from": "sara", "text": "salam", "ts": time.time()})
     check("unread counted on the tab", app.pm_unread.get("sara") == 1
           and app.tabs["friends"][2].cget("text") == "1")
-    check("unread shown on the friend row", "Chat (1)" in [b.cget("text") for b in buttons(app.fr_body)])
-    [b for b in buttons(app.fr_body) if b.cget("text") == "Chat (1)"][0].invoke()
+    dots = [c for c in app.fr_body.winfo_children() if isinstance(c, ctk.CTkFrame)]
+    circ = [c for w in dots for c in w.winfo_children()
+            if isinstance(c, ctk.CTkLabel) and c.cget("text") == "1" and c.cget("fg_color") == vp.RED]
+    check("unread is a red circle with the number inside", bool(circ), str(dots))
+    [b for b in buttons(app.fr_body) if b.cget("text") == "Chat"][0].invoke()
     check("opening the chat reads it and clears the badge",
           "salam" in app.pm_box.get("1.0", "end") and app.tabs["friends"][2].winfo_manager() == "")
     check("chat header names the friend", app.pm_title.cget("text") == "sara"
@@ -231,7 +248,45 @@ def main():
     app.select_tab("room")
     check("room page shows the role", app.page == "room"
           and app.lbl_role.cget("text") == vp.ROLE_BADGE["owner"][0], str(app.lbl_role.cget("text")))
+
+    # 11b. "X is typing ..." on both the room chat and a private thread
+    app.on_event({"t": "typing", "room": app.node.rid, "from": "sara"})
+    app.on_event({"t": "typing", "room": app.node.rid, "from": "milad"})
+    app.tick()
+    check("two names become one typing line",
+          app.lbl_typing.cget("text") == "milad and sara are typing ...",
+          app.lbl_typing.cget("text"))
+    app.on_event({"t": "typing", "room": 999, "from": "stranger"})
+    app.tick()
+    check("a typing note about another room is ignored",
+          app.lbl_typing.cget("text") == "milad and sara are typing ...")
+    app.typing_room["milad"] = time.time() - 1
+    app.tick()
+    check("the dots expire on their own", app.lbl_typing.cget("text") == "sara is typing ...",
+          app.lbl_typing.cget("text"))
+    app.sel_friend = "sara"
+    app.on_event({"t": "typing", "from": "sara"})
+    app.tick()
+    check("the private thread has its own typing line",
+          app.pm_typing.cget("text") == "sara is typing ...", app.pm_typing.cget("text"))
+    app.sel_friend = None
+    app.tick()
+    check("closing the thread drops her typing line", app.pm_typing.cget("text") == "")
+    app.note_typing("sara")
+    app.note_typing("sara")
+    check("typing is said on the wire, but never twice in a row",
+          app.link.sent.count(("typing", {"user": "sara"})) == 1, str(app.link.sent[-3:]))
+    app.note_typing()
+    check("room typing goes out while inside a room", ("typing", {}) in app.link.sent,
+          str(app.link.sent[-3:]))
+    sent_room = app.link.sent.count(("typing", {}))
     app.node = None
+    app.tick()
+    check("leaving the room clears the room typing line", app.lbl_typing.cget("text") == "")
+    app.note_typing()
+    check("no room typing is sent without a room",
+          app.link.sent.count(("typing", {})) == sent_room)
+    app.tick()
     app.update_tabs()
     check("Room tab goes away with the room", app.tabs["room"][0].winfo_manager() == "")
     app.select_tab("room")
@@ -240,7 +295,7 @@ def main():
     # 12. Logs is a page too and carries the same header
     app.select_tab("logs")
     check("logs page with the brand header", app.page == "logs"
-          and {"V LAN", "42", "Logs"} <= set(labels(app.pg_logs)))
+          and {"VLAN", "42", "Logs"} <= set(labels(app.pg_logs)))
     app.q_put("a line for the log")
     app.tick()
     check("log lines land in the page", "a line for the log" in app.logbox.get("1.0", "end"))
@@ -252,7 +307,7 @@ def main():
     app.panel_head(top, "Roles and permissions")
     check("panel title uses the app name", top.title() == "V LAN 42 - Admin panel", top.title())
     check("panel header carries the wordmark",
-          {"V LAN", "42", "Roles and permissions"} <= set(labels(top)), str(labels(top)))
+          {"VLAN", "42", "Roles and permissions"} <= set(labels(top)), str(labels(top)))
     check("panel header carries the logo picture", bool(images(top)), str(labels(top)))
     top.destroy()
 

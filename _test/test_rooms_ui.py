@@ -38,11 +38,11 @@ def make_app():
     f.lbl_rooms_count = ctk.CTkLabel(root, text="")
     f.rows, f.room_rows, f.my_rooms = {}, {}, []
     f.rooms_empty, f.entering_rid, f.busy, f.node, f.link = None, None, False, None, None
-    f.entered, f.removed = [], []
+    f.entered, f.removed, f.await_enter = [], [], None
     f.enter_room = lambda r: f.entered.append(r)
     f.remove_room = lambda r: f.removed.append(r)
     for nm in ("btn", "room_sig", "find_room", "clear_rooms", "show_rooms_empty",
-               "add_room_row", "set_room_row", "on_my_rooms"):
+               "add_room_row", "set_room_row", "on_my_rooms", "inside"):
         setattr(f, nm, types.MethodType(getattr(vp.App, nm), f))
     return f
 

@@ -38,6 +38,7 @@ JOIN_TRY_LIMIT = 6            # wrong invites/passwords per account before a coo
 JOIN_COOLDOWN = 120           # seconds
 JOIN_WINDOW = 600             # the tries that count are the last ten minutes
 INVITE_PREFIX = "vlan42://join/"
+PUBLIC_HOST = "v42.ir"          # the address players dial; point its A record at this VPS
 
 _logf = None
 _log_lock = threading.Lock()
@@ -386,8 +387,8 @@ class Server:
         self.push_gatekeepers(r["id"], {"t": "jreq", "room": r["id"], "name": r["name"],
                                         "user": uid, "from": c.user["username"], "ts": now,
                                         "count": len(self.pending(r["id"]))})
-        return {"t": "join_room", "ok": True, "pending": True, "room_name": r["name"],
-                "invite": self.make_invite(r),
+        return {"t": "join_room", "ok": True, "pending": True, "room": r["id"],
+                "room_name": r["name"], "invite": self.make_invite(r),
                 "msg": "The host must approve you before you can enter"}
 
     def do_join_list(self, c, m):
@@ -808,6 +809,8 @@ class Server:
         srv.bind(("0.0.0.0", self.tcp_port))
         srv.listen(64)
         log(f"V.Lan.42 server ready - TCP {self.tcp_port} / UDP {self.udp_port}")
+        log(f"Players reach this VPS at {PUBLIC_HOST}:{self.tcp_port} - they never type it themselves,")
+        log(f"   the app falls back to the IPs in vlan42_servers.txt if the domain does not answer.")
         log(f"coded by Hossein & Erfan - https://github.com/mhbanaei")
         time.sleep(2)            # let the UDP thread report the truth
         if self.udp_ready:

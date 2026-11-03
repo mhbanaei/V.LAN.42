@@ -100,6 +100,21 @@ def state(n, rid, bob_online):
                                  "vip": "10.77.0.2", "online": bob_online}]})
 
 
+
+def join(c, host, code, pwd):
+    """The guest knocks with the room password and the host lets them in - the same
+    two steps the app's accept card performs. Returns the join answer, with the room
+    dict in it once they are inside."""
+    r = c.req("join_room", code=code, pwd=pwd)
+    if r.get("ok") and r.get("pending"):
+        ok = host.req("join_resp", room=r["room"], user=c.user["id"], accept=True).get("ok")
+        if not ok:
+            return {"t": "join_room", "ok": False, "err": "the host did not answer"}
+        st = c.drain_push("room_state", timeout=6)
+        r = {"t": "join_room", "ok": st is not None, "room": (st or {}).get("room"),
+             "pending": False}
+    return r
+
 def main():
     srv, d = boot()
     try:
@@ -109,7 +124,7 @@ def main():
             c.token, c.user = r["token"], r["user"]
         r = a.req("create_room", name="tmo room", pwd="roompw1")
         rid = r["room"]["id"]
-        b.req("join_room", code=r["room"]["code"], pwd="roompw1")
+        join(b, a, r["room"]["code"], "roompw1")
         a.req("activate", room=rid)
         b.req("activate", room=rid)
         ua, ub = a.udp(), b.udp()

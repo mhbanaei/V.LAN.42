@@ -41,23 +41,45 @@ if errorlevel 1 (
 )
 
 echo.
+echo Default VPS address for players: v42.ir
+echo    Players never type an address - the app dials v42.ir and then the extra
+echo    lines of vlan42_servers.txt. Make v42.ir a DNS A record for THIS VPS.
+echo    To use another address, run:  start_server.bat  domain-or-ip
+set SERVERADDR=v42.ir
+if not "%~1"=="" set SERVERADDR=%~1
+
+REM Keep the team's file; create it with the default when it is missing.
+if not exist "vlan42_servers.txt" (
+    >"vlan42_servers.txt" echo # V.Lan.42 addresses the clients try, in this order.
+    >>"vlan42_servers.txt" echo # One "domain", "ip" or "ip:port" per line. Lines with # are notes.
+    >>"vlan42_servers.txt" echo %SERVERADDR%
+    echo vlan42_servers.txt created with %SERVERADDR%
+)
+
+echo.
 echo Finding the public address of this VPS ...
 set PUBLICIP=
 for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "(Invoke-RestMethod 'https://api.ipify.org?format=json').ip"`) do set PUBLICIP=%%I
 if defined PUBLICIP (
-    echo %PUBLICIP%> "vlan42_servers.txt"
-    echo This VPS address was saved to vlan42_servers.txt: %PUBLICIP%
+    echo This VPS public IP : %PUBLICIP%
+    REM The raw IP joins the list as a fallback, so a DNS problem does not lock everyone out.
+    findstr /x /c:"%PUBLICIP%" "vlan42_servers.txt" >nul 2>&1
+    if errorlevel 1 (
+        >>"vlan42_servers.txt" echo %PUBLICIP%
+        echo Added %PUBLICIP% to vlan42_servers.txt ^(after %SERVERADDR%^).
+    )
 ) else (
-    echo NOTE: could not detect the address. Write it into vlan42_servers.txt yourself:
+    echo NOTE: could not detect the public IP. Write it into vlan42_servers.txt yourself:
     echo       one line with the VPS IP, for example  203.0.113.10
 )
 echo.
 echo ============================================================
 echo  V.Lan.42 server starting - keep this window OPEN.
 echo.
-echo  Players never type an address. Give them the line from
-echo  vlan42_servers.txt (put that file next to V.Lan.42.exe,
-echo  or in this folder before running build_exe.bat).
+echo  Players sign in with a username and password only. The address
+echo  they connect to comes from %SERVERADDR% ^(plus any extra lines in
+echo  vlan42_servers.txt^), which build_exe.bat bundles into the exe -
+echo  ship that file next to V.Lan.42.exe if you change it.
 echo  Ports: TCP 4242 + UDP 4242 must stay open - inside Windows
 echo  AND in the firewall/security panel of your hosting company.
 echo  UDP is the one people forget: without it players can log in

@@ -33,8 +33,12 @@ DEFAULT_LIMIT = 16
 UDP_TIMEOUT = 30          # seconds without UDP traffic -> member marked offline (timeout)
 DEFAULT_TCP_PORT = 4242
 DEFAULT_UDP_PORT = 4242
-PERMS = ("kick", "ban", "unban", "limit")
+PERMS = ("kick", "ban", "unban", "limit", "approve")
+JOIN_TRY_LIMIT = 6            # wrong invites/passwords per account before a cooloff
+JOIN_COOLDOWN = 120           # seconds
+JOIN_WINDOW = 600             # the tries that count are the last ten minutes
 INVITE_PREFIX = "vlan42://join/"
+PUBLIC_HOST = "v42.ir"          # the address players dial; point its A record at this VPS
 
 _logf = None
 _log_lock = threading.Lock()
@@ -91,6 +95,9 @@ class DB:
                 from_id INTEGER, to_id INTEGER, ts REAL, PRIMARY KEY(from_id, to_id));
             CREATE TABLE IF NOT EXISTS friends(
                 a INTEGER, b INTEGER, PRIMARY KEY(a, b));
+            CREATE TABLE IF NOT EXISTS jreq(
+                room_id INTEGER, user_id INTEGER, ts REAL,
+                PRIMARY KEY(room_id, user_id));
             """)
             self.cx.commit()
 
@@ -135,6 +142,7 @@ class Server:
         self.udp_users = {}        # user_id -> {"ep": (ip,port), "last": t}
         self.ep_users = {}         # (ip,port) -> user_id
         self.tokens = {}           # raw 16-byte token -> user_id (cache)
+        self.join_fails = []       # [(user_id, when)] - the anti-guessing counter
         self.udp_ready = False
 
     # ---------------- helpers
@@ -261,7 +269,10 @@ class Server:
                             "online": u["id"] in online})
         return {"id": r["id"], "code": r["code"], "name": r["name"], "pwd": r["pwd"],
                 "key": r["roomkey"], "limit": r["member_limit"], "members": members,
-                "my_role": me["role"] if me else None, "my_perms": json.loads(me["perms"] or "{}") if me else {}}
+                "my_role": me["role"] if me else None,
+                "my_perms": json.loads(me["perms"] or "{}") if me else {},
+                # only the people who can answer see that a queue exists
+                "pending": len(self.pending(rid)) if self.can(uid, rid, "approve") else 0}
 
     def make_invite(self, r):
         raw = json.dumps({"c": r["code"], "p": r["pwd"]}, separators=(",", ":")).encode()
@@ -277,16 +288,63 @@ class Server:
             return bool(json.loads(me["perms"] or "{}").get(perm))
         return False
 
+    def cooloff(self, uid, now):
+        """Seconds an account must wait before it may try another invite link.
+        Six misses in ten minutes is a human typo; more is a script."""
+        with self.lock:
+            self.join_fails = [(u, t) for (u, t) in self.join_fails if now - t < JOIN_WINDOW]
+            hits = sorted(t for (u, t) in self.join_fails if u == uid)
+            if len(hits) < JOIN_TRY_LIMIT:
+                return 0
+            return max(1, int(hits[0] + JOIN_COOLDOWN - now) + 1)
+
+    def mark_fail(self, uid, now):
+        with self.lock:
+            self.join_fails.append((uid, now))
+
+    def clear_fails(self, uid):
+        with self.lock:
+            self.join_fails = [(u, t) for (u, t) in self.join_fails if u != uid]
+
+    def pending(self, rid):
+        rows = self.db.q("SELECT user_id, ts FROM jreq WHERE room_id=? ORDER BY ts", (rid,))
+        out = []
+        for x in rows:
+            u = self.user_by_id(x["user_id"])
+            if u:
+                out.append({"id": x["user_id"], "name": u["username"], "ts": x["ts"]})
+        return out
+
+    def gatekeepers(self, rid):
+        """Who may answer a join request: the host, plus admins given the approve power."""
+        out = []
+        for mrow in self.room_members(rid):
+            if mrow["role"] == "owner":
+                out.append(mrow["user_id"])
+            elif mrow["role"] == "admin" and json.loads(mrow["perms"] or "{}").get("approve"):
+                out.append(mrow["user_id"])
+        return out
+
+    def push_gatekeepers(self, rid, payload):
+        for uid in self.gatekeepers(rid):
+            tc = self.conns.get(uid)
+            if tc:
+                try:
+                    tc.push(payload)
+                except Exception:
+                    pass
+
     def do_create_room(self, c, m):
         uid = c.user["id"]
         name = (m.get("name") or "").strip()[:32] or "room"
         pwd = (m.get("pwd") or "").strip()
-        if not (3 <= len(name)) or len(pwd) < 4:
-            return {"t": "create_room", "ok": False, "err": "Room name min 3 chars, password min 4 chars"}
+        if not (3 <= len(name)) or len(pwd) < 6:
+            return {"t": "create_room", "ok": False,
+                    "err": "Room name min 3 chars, room password min 6 chars (use the dice)"}
         if self.membership_count(uid) >= MAX_ROOMS_PER_USER:
             return {"t": "create_room", "ok": False,
                     "err": f"You are in {MAX_ROOMS_PER_USER} rooms already - remove one from your list first"}
-        code = secrets.token_hex(3)
+        code = secrets.token_hex(4)
         roomkey = secrets.token_hex(32)
         cur = self.db.run("INSERT INTO rooms(code,name,salt,pwhash,roomkey,pwd,owner_id,member_limit,created)"
                           " VALUES(?,?,?,?,?,?,?,?,?)",
@@ -302,14 +360,21 @@ class Server:
         uid = c.user["id"]
         code = (m.get("code") or "").strip()
         pwd = m.get("pwd") or ""
+        now = time.time()
+        wait = self.cooloff(uid, now)
+        if wait:
+            return {"t": "join_room", "ok": False,
+                    "err": f"Too many wrong invites - wait {wait}s and try again"}
         r = self.room_by_code(code)
-        if not r:
-            return {"t": "join_room", "ok": False, "err": "No room with this invite"}
-        if pwd != r["pwd"]:
-            return {"t": "join_room", "ok": False, "err": "Wrong room password"}
+        if not r or pwd != r["pwd"]:
+            # one answer for both cases: nothing here tells a script which codes exist
+            self.mark_fail(uid, now)
+            return {"t": "join_room", "ok": False, "err": "Wrong invite link or room password"}
+        self.clear_fails(uid)
         if self.is_banned(r["id"], uid):
             return {"t": "join_room", "ok": False, "err": "You are banned from this room"}
         if self.member_row(r["id"], uid):
+            self.db.run("DELETE FROM jreq WHERE room_id=? AND user_id=?", (r["id"], uid))
             return {"t": "join_room", "ok": True, "room": self.room_json(r["id"], uid),
                     "invite": self.make_invite(r)}
         if self.membership_count(uid) >= MAX_ROOMS_PER_USER:
@@ -317,13 +382,42 @@ class Server:
                     "err": f"You are in {MAX_ROOMS_PER_USER} rooms already - remove one from your list first"}
         if len(self.room_members(r["id"])) >= r["member_limit"]:
             return {"t": "join_room", "ok": False, "err": "This room is full"}
-        taken = {row["vip"] for row in self.room_members(r["id"])}
-        vip = make_vip(taken)
-        self.db.run("INSERT INTO members(room_id,user_id,role,perms,vip,joined) VALUES(?,?,?,?,?,?)",
-                    (r["id"], uid, "member", "{}", vip, time.time()))
-        self.push_state(r["id"])
-        return {"t": "join_room", "ok": True, "room": self.room_json(r["id"], uid),
-                "invite": self.make_invite(r)}
+        # the password only opens the door: a new face waits for the host's yes
+        self.db.run("INSERT OR REPLACE INTO jreq(room_id,user_id,ts) VALUES(?,?,?)", (r["id"], uid, now))
+        self.push_gatekeepers(r["id"], {"t": "jreq", "room": r["id"], "name": r["name"],
+                                        "user": uid, "from": c.user["username"], "ts": now,
+                                        "count": len(self.pending(r["id"]))})
+        return {"t": "join_room", "ok": True, "pending": True, "room": r["id"],
+                "room_name": r["name"], "invite": self.make_invite(r),
+                "msg": "The host must approve you before you can enter"}
+
+    def do_join_list(self, c, m):
+        rid = int(m.get("room") or 0)
+        if not self.can(c.user["id"], rid, "approve"):
+            return {"t": "join_list", "ok": False, "err": "Only the host can review join requests"}
+        return {"t": "join_list", "ok": True, "room": rid, "requests": self.pending(rid)}
+
+    def do_join_resp(self, c, m):
+        rid, target = int(m.get("room") or 0), int(m.get("user") or 0)
+        if not self.can(c.user["id"], rid, "approve"):
+            return {"t": "join_resp", "ok": False, "err": "Only the host can review join requests"}
+        r = self.room_by_id(rid)
+        if not r:
+            return {"t": "join_resp", "ok": False, "err": "No such room"}
+        self.db.run("DELETE FROM jreq WHERE room_id=? AND user_id=?", (rid, target))
+        accepted = bool(m.get("accept"))
+        if accepted and not self.member_row(rid, target):
+            if len(self.room_members(rid)) < r["member_limit"]:
+                taken = {row["vip"] for row in self.room_members(rid)}
+                self.db.run("INSERT INTO members(room_id,user_id,role,perms,vip,joined) "
+                            "VALUES(?,?,?,?,?,?)", (rid, target, "member", "{}", make_vip(taken), time.time()))
+                self.push_state(rid)
+            else:
+                accepted = False
+        self.push_user(target, {"t": "join_ok" if accepted else "join_no", "room": rid,
+                                "name": r["name"], "by": c.user["username"]})
+        self.push_gatekeepers(rid, {"t": "jreq_upd", "room": rid, "count": len(self.pending(rid))})
+        return {"t": "join_resp", "ok": True, "room": rid, "requests": self.pending(rid)}
 
     def do_remove_room(self, c, m):
         uid = c.user["id"]
@@ -344,6 +438,7 @@ class Server:
             else:
                 self.db.run("DELETE FROM members WHERE room_id=?", (rid,))
                 self.db.run("DELETE FROM bans WHERE room_id=?", (rid,))
+                self.db.run("DELETE FROM jreq WHERE room_id=?", (rid,))
                 self.db.run("DELETE FROM rooms WHERE id=?", (rid,))
                 return {"t": "remove_room", "ok": True}
         if c.active_room == rid:
@@ -363,6 +458,7 @@ class Server:
         if t["role"] != "member" and me["role"] != "owner":
             return {"t": "kick", "ok": False, "err": "Only the owner can kick admins"}
         self.db.run("DELETE FROM members WHERE room_id=? AND user_id=?", (rid, target))
+        self.db.run("DELETE FROM jreq WHERE room_id=? AND user_id=?", (rid, target))
         tu = self.user_by_id(target)
         self.push_user(target, {"t": "kicked", "room": rid, "by": c.user["username"]})
         tc = self.conns.get(target)
@@ -713,6 +809,8 @@ class Server:
         srv.bind(("0.0.0.0", self.tcp_port))
         srv.listen(64)
         log(f"V.Lan.42 server ready - TCP {self.tcp_port} / UDP {self.udp_port}")
+        log(f"Players reach this VPS at {PUBLIC_HOST}:{self.tcp_port} - they never type it themselves,")
+        log(f"   the app falls back to the IPs in vlan42_servers.txt if the domain does not answer.")
         log(f"coded by Hossein & Erfan - https://github.com/mhbanaei")
         time.sleep(2)            # let the UDP thread report the truth
         if self.udp_ready:
@@ -887,10 +985,13 @@ class Conn:
                                                    if s.room_json(r["room_id"], self.user["id"])]},
                     "create_room": lambda: s.do_create_room(self, m),
                     "join_room": lambda: s.do_join_room(self, m),
+                    "join_list": lambda: s.do_join_list(self, m),
+                    "join_resp": lambda: s.do_join_resp(self, m),
                     "remove_room": lambda: s.do_remove_room(self, m),
                     "activate": lambda: self._do_activate(m),
                     "deactivate": lambda: self._do_deactivate(m),
                     "chat": lambda: self._do_chat(m),
+                    "typing": lambda: self._do_typing(m),
                     "kick": lambda: s.do_kick(self, m),
                     "ban": lambda: s.do_ban(self, m),
                     "unban": lambda: s.do_unban(self, m),
@@ -938,12 +1039,38 @@ class Conn:
             self.srv.push_state(rid)
         return {"t": "deactivate", "ok": True}
 
+    def _do_typing(self, m):
+        """The three dots. Fire and forget: the client never waits for the answer."""
+        name = self.user["username"]
+        uid = self.user["id"]
+        to = (m.get("user") or "").strip()
+        if to:
+            t = self.srv.user_by_name(to)
+            if not t:
+                return {"t": "typing", "ok": False, "err": "No user with that name"}
+            if not self.srv.db.one("SELECT * FROM friends WHERE (a=? AND b=?) OR (a=? AND b=?)",
+                                   (uid, t["id"], t["id"], uid)):
+                return {"t": "typing", "ok": False, "err": "Not friends"}
+            tc = self.srv.conns.get(t["id"])
+            if tc:
+                try:
+                    tc.push({"t": "typing", "from": name})
+                except Exception:
+                    pass
+            return {"t": "typing", "ok": True}
+        rid = self.active_room
+        if rid:
+            self.srv.push_room(rid, {"t": "typing", "room": rid, "from": name}, skip=uid)
+        return {"t": "typing", "ok": True}
+
     def _do_chat(self, m):
         text = (m.get("text") or "").strip()[:500]
         rid = self.active_room
         if not rid or not text:
             return {"t": "chat", "ok": False, "err": "Not in a room"}
+        me = self.srv.member_row(rid, self.user["id"])
         self.srv.push_room(rid, {"t": "chat", "room": rid, "from": self.user["username"],
+                                 "role": me["role"] if me else "member",
                                  "text": text, "ts": time.time()})
         return {"t": "chat", "ok": True}
 

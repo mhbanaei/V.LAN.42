@@ -43,9 +43,10 @@ if exist vlan42_servers.txt (
     set DATA=%DATA% --add-data "vlan42_servers.txt;."
     echo vlan42_servers.txt found - the VPS address is built into the exe.
 ) else (
-    echo NOTE: no vlan42_servers.txt here. Players never type a server address, so put
-    echo       that file ^(one VPS IP per line^) next to this script before building,
-    echo       or next to V.Lan.42.exe after building.
+    echo NOTE: no vlan42_servers.txt here. That is fine - the exe falls back to v42.ir,
+    echo       which is the address the team points at the VPS. Players never type any
+    echo       address themselves. Ship a vlan42_servers.txt ^(one domain or IP per line^)
+    echo       next to V.Lan.42.exe only when the VPS has another address.
 )
 
 pyinstaller --noconfirm --clean %MODE% --windowed --uac-admin --noupx --collect-all customtkinter %ICON% %DATA% %EXTRA% --name V.Lan.42 vplan42.py

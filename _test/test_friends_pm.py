@@ -48,6 +48,21 @@ def names(items):
     return [x["name"] for x in items or []]
 
 
+
+def join(c, host, code, pwd):
+    """The guest knocks with the room password and the host lets them in - the same
+    two steps the app's accept card performs. Returns the join answer, with the room
+    dict in it once they are inside."""
+    r = c.req("join_room", code=code, pwd=pwd)
+    if r.get("ok") and r.get("pending"):
+        ok = host.req("join_resp", room=r["room"], user=c.user["id"], accept=True).get("ok")
+        if not ok:
+            return {"t": "join_room", "ok": False, "err": "the host did not answer"}
+        st = c.drain_push("room_state", timeout=6)
+        r = {"t": "join_room", "ok": st is not None, "room": (st or {}).get("room"),
+             "pending": False}
+    return r
+
 def main():
     proc, d = boot()
     try:
@@ -83,6 +98,14 @@ def main():
         r = carol.req("pm", user="erin", text="hi")
         check("a stranger cannot be written to", not r.get("ok") and "friend" in str(r.get("err")), str(r))
 
+        # 3b. the typing dots travel the same friend-only path
+        check("typing to a friend is answered", carol.req("typing", user="dave").get("ok"))
+        tp = dave.drain_push("typing", timeout=6)
+        check("the friend sees the dots start",
+              tp is not None and tp.get("from") == "carol" and not tp.get("room"), str(tp))
+        r = carol.req("typing", user="erin")
+        check("a stranger never sees you typing", not r.get("ok") and "friend" in str(r.get("err")), str(r))
+
         # 4. a friend whose connection is gone is reported as not delivered
         check("erin and dave become friends",
               dave.req("add_friend", user="erin").get("ok")
@@ -96,9 +119,10 @@ def main():
         room = dave.req("create_room", name="game night", pwd="roompw1")["room"]
         rid = room["id"]
         fern = register("fern")
-        cj = carol.req("join_room", code=room["code"], pwd="roompw1")
-        fj = fern.req("join_room", code=room["code"], pwd="roompw1")
-        check("two players join by code", cj.get("ok") and fj.get("ok"), str(cj.get("err")))
+        cj = join(carol, dave, room["code"], "roompw1")
+        fj = join(fern, dave, room["code"], "roompw1")
+        check("two players join by code once the host says yes",
+              cj.get("ok") and fj.get("ok"), str(cj.get("err")))
         cid = next(m["id"] for m in cj["room"]["members"] if m["name"] == "carol")
         r = dave.req("set_admin", room=rid, user=cid, admin=True,
                      perms={"kick": True, "ban": True, "unban": False, "limit": False})
@@ -134,6 +158,14 @@ def main():
         rc = fern.drain_push("chat", timeout=6)
         check("a waiting member reads the room chat",
               rc is not None and rc.get("text") == "game ready" and rc.get("from") == "dave", str(rc))
+
+        # 7b. the three dots ride the same room path
+        check("the owner says he is typing", dave.req("typing").get("ok"))
+        tp = fern.drain_push("typing", timeout=6)
+        check("the room sees the dots start",
+              tp is not None and tp.get("room") == rid and tp.get("from") == "dave", str(tp))
+        check("the typist is never told about himself",
+              dave.drain_push("typing", timeout=1) is None)
 
         # 8. breaking a friendship closes the chat on both screens
         r = dave.req("remove_friend", user="carol")

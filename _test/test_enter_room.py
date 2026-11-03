@@ -86,6 +86,42 @@ def make_node(link, room):
     return node, logs
 
 
+
+def hear(link):
+    """Every push this connection gets from now on, kept for the test to read."""
+    box = []
+    prev = link.push_cb
+
+    def cb(p):
+        box.append(p)
+        if prev:
+            prev(p)
+    link.push_cb = cb
+    return box
+
+
+def latest(box, t, timeout=8):
+    end = time.time() + timeout
+    while time.time() < end:
+        for p in box:
+            if p.get("t") == t:
+                return p
+        time.sleep(0.1)
+    return None
+
+
+def join(c, host, code, pwd):
+    """Knock with the room password, then the host opens the door - item 13's path."""
+    knocks = hear(host)
+    r = c.req("join_room", code=code, pwd=pwd)
+    if r.get("pending"):
+        mine = hear(c)
+        host.req("join_resp", room=r["room"], user=c.user["id"], accept=True)
+        st = latest(mine, "room_state")
+        r = {"t": "join_room", "ok": st is not None, "room": (st or {}).get("room"),
+             "knock": latest(knocks, "jreq"), "in": latest(mine, "join_ok")}
+    return r
+
 def main():
     vp.ensure_wintun = lambda log=None: None
     vp.Tun = FakeTun
@@ -118,8 +154,10 @@ def main():
         check("virtual IP handed out", node_a.vip == "10.77.0.1", str(node_a.vip))
 
         # --- a second player: the game traffic must travel through the relay
-        j = b.req("join_room", code=room["code"], pwd="roompw1")
-        check("second player joined", j.get("ok"), str(j))
+        j = join(b, a, room["code"], "roompw1")
+        check("second player joined after the host said yes", j.get("ok"), str(j))
+        check("the host heard the knock", j.get("knock", {}).get("from") == "entry_b", str(j.get("knock")))
+        check("the guest heard the answer", j.get("in", {}).get("room") == room["id"], str(j.get("in")))
         node_a.update_state(j["room"])          # like the room_state push the App forwards
         node_b, logs_b = make_node(b, j["room"])
         nodes.append(node_b)
@@ -140,7 +178,7 @@ def main():
         check("game traffic is relayed to the other player", got == b"\x45hello through the vps", str(got))
 
         # --- a relay that never answers: loud, specific error instead of a silent stall
-        jc = c.req("join_room", code=room["code"], pwd="roompw1")
+        jc = join(c, a, room["code"], "roompw1")
         check("third player joined", jc.get("ok"), str(jc))
         node_c, _ = make_node(c, jc["room"])
         node_c._wait_relay = lambda secs: False        # pretend UDP 4242 is blocked
