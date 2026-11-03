@@ -1,0 +1,160 @@
+2026-11-03 15:54:04 UDP relay listening on port 45242
+2026-11-03 15:54:04 V.Lan.42 server ready - TCP 45242 / UDP 45242
+2026-11-03 15:54:04 coded by Hossein & Erfan - https://github.com/mhbanaei
+2026-11-03 15:54:04 conn ('127.0.0.1', 50115) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 757, in run
+    if not self.handshake():
+           ~~~~~~~~~~~~~~^^
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 655, in handshake
+    m = self.recv_plain()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 674, in recv_plain
+    chunk = self.sock.recv(4096)
+ConnectionAbortedError: [WinError 10053] An established connection was aborted by the software in your host machine
+
+2026-11-03 15:54:04 register: alice from 127.0.0.1
+2026-11-03 15:54:04 register: bob from 127.0.0.1
+2026-11-03 15:54:04 register: dave from 127.0.0.1
+2026-11-03 15:54:04 conn ('127.0.0.1', 50118) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 761, in run
+    m = self.recv()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 708, in recv
+    line = self.recv_line()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 688, in recv_line
+    chunk = self.sock.recv(4096)
+OSError: [WinError 10038] An operation was attempted on something that is not a socket
+
+2026-11-03 15:54:04 login_token: dave from 127.0.0.1
+2026-11-03 15:54:09 register: carol from 127.0.0.1
+2026-11-03 15:54:09 kick: carol out of room 1 by bob
+2026-11-03 15:54:10 ban: user 4 from room 1 by bob (cheating)
+2026-11-03 15:54:10 register: erin from 127.0.0.1
+2026-11-03 16:14:40 UDP relay listening on port 45242
+2026-11-03 16:14:40 V.Lan.42 server ready - TCP 45242 / UDP 45242
+2026-11-03 16:14:40 coded by Hossein & Erfan - https://github.com/mhbanaei
+2026-11-03 16:14:40 conn ('127.0.0.1', 53604) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 758, in run
+    if not self.handshake():
+           ~~~~~~~~~~~~~~^^
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 656, in handshake
+    m = self.recv_plain()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 675, in recv_plain
+    chunk = self.sock.recv(4096)
+ConnectionAbortedError: [WinError 10053] An established connection was aborted by the software in your host machine
+
+2026-11-03 16:14:40 register: alice from 127.0.0.1
+2026-11-03 16:14:41 register: bob from 127.0.0.1
+2026-11-03 16:14:41 register: dave from 127.0.0.1
+2026-11-03 16:14:41 conn ('127.0.0.1', 53608) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 762, in run
+    m = self.recv()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 709, in recv
+    line = self.recv_line()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 689, in recv_line
+    chunk = self.sock.recv(4096)
+OSError: [WinError 10038] An operation was attempted on something that is not a socket
+
+2026-11-03 16:14:41 login_token: dave from 127.0.0.1
+2026-11-03 16:14:44 conn ('127.0.0.1', 53609) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 762, in run
+    m = self.recv()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 709, in recv
+    line = self.recv_line()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 689, in recv_line
+    chunk = self.sock.recv(4096)
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+
+2026-11-03 16:14:46 register: carol from 127.0.0.1
+2026-11-03 16:14:46 kick: carol out of room 1 by bob
+2026-11-03 16:14:46 ban: user 4 from room 1 by bob (cheating)
+2026-11-03 16:14:46 register: erin from 127.0.0.1
+2026-11-03 16:16:28 UDP relay listening on port 45242
+2026-11-03 16:16:28 V.Lan.42 server ready - TCP 45242 / UDP 45242
+2026-11-03 16:16:28 coded by Hossein & Erfan - https://github.com/mhbanaei
+2026-11-03 16:16:28 conn ('127.0.0.1', 52288) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 758, in run
+    if not self.handshake():
+           ~~~~~~~~~~~~~~^^
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 656, in handshake
+    m = self.recv_plain()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 675, in recv_plain
+    chunk = self.sock.recv(4096)
+ConnectionAbortedError: [WinError 10053] An established connection was aborted by the software in your host machine
+
+2026-11-03 16:16:29 register: alice from 127.0.0.1
+2026-11-03 16:16:29 register: bob from 127.0.0.1
+2026-11-03 16:16:29 register: dave from 127.0.0.1
+2026-11-03 16:16:29 conn ('127.0.0.1', 52291) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 762, in run
+    m = self.recv()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 709, in recv
+    line = self.recv_line()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 689, in recv_line
+    chunk = self.sock.recv(4096)
+OSError: [WinError 10038] An operation was attempted on something that is not a socket
+
+2026-11-03 16:16:29 login_token: dave from 127.0.0.1
+2026-11-03 16:16:32 conn ('127.0.0.1', 52292) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 762, in run
+    m = self.recv()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 709, in recv
+    line = self.recv_line()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 689, in recv_line
+    chunk = self.sock.recv(4096)
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+
+2026-11-03 16:16:34 register: carol from 127.0.0.1
+2026-11-03 16:16:35 kick: carol out of room 1 by bob
+2026-11-03 16:16:36 ban: user 4 from room 1 by bob (cheating)
+2026-11-03 16:16:37 register: erin from 127.0.0.1
+2026-11-03 16:59:30 UDP relay listening on port 45242
+2026-11-03 16:59:30 V.Lan.42 server ready - TCP 45242 / UDP 45242
+2026-11-03 16:59:30 coded by Hossein & Erfan - https://github.com/mhbanaei
+2026-11-03 16:59:32 Players can join now. Still need inbound 45242 TCP *and* UDP
+2026-11-03 16:59:32    in the firewall of your hosting panel, not only inside Windows.
+2026-11-03 16:59:32 conn ('127.0.0.1', 62714) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 802, in run
+    if not self.handshake():
+           ~~~~~~~~~~~~~~^^
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 700, in handshake
+    m = self.recv_plain()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 719, in recv_plain
+    chunk = self.sock.recv(4096)
+ConnectionAbortedError: [WinError 10053] An established connection was aborted by the software in your host machine
+
+2026-11-03 16:59:33 register: alice from 127.0.0.1
+2026-11-03 16:59:33 register: bob from 127.0.0.1
+2026-11-03 16:59:34 register: dave from 127.0.0.1
+2026-11-03 16:59:34 conn ('127.0.0.1', 49756) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 806, in run
+    m = self.recv()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 753, in recv
+    line = self.recv_line()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 733, in recv_line
+    chunk = self.sock.recv(4096)
+OSError: [WinError 10038] An operation was attempted on something that is not a socket
+
+2026-11-03 16:59:34 login_token: dave from 127.0.0.1
+2026-11-03 16:59:37 conn ('127.0.0.1', 57010) error:
+Traceback (most recent call last):
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 806, in run
+    m = self.recv()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 753, in recv
+    line = self.recv_line()
+  File "C:\Users\Hossein\Desktop\Git\V.Lan.42\_test\vlan42_server.py", line 733, in recv_line
+    chunk = self.sock.recv(4096)
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+
+2026-11-03 16:59:39 register: carol from 127.0.0.1
+2026-11-03 16:59:39 kick: carol out of room 1 by bob
+2026-11-03 16:59:40 ban: user 4 from room 1 by bob (cheating)
+2026-11-03 16:59:40 register: erin from 127.0.0.1

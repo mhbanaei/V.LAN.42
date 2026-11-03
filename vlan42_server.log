@@ -1,0 +1,10 @@
+2026-11-03 15:35:55 UDP relay listening on port 4242
+2026-11-03 15:35:55 V.Lan.42 server ready - TCP 4242 / UDP 4242
+2026-11-03 15:35:55 coded by Hossein & Erfan - https://github.com/mhbanaei
+2026-11-03 15:39:42 register: 042 from 127.0.0.1
+2026-11-03 15:40:40 member offline: 042 (timeout: no data for 30s)
+2026-11-03 15:42:05 member offline: 042 (timeout: no data for 30s)
+2026-11-03 16:31:08 UDP relay listening on port 4242
+2026-11-03 16:31:08 V.Lan.42 server ready - TCP 4242 / UDP 4242
+2026-11-03 16:31:08 coded by Hossein & Erfan - https://github.com/mhbanaei
+2026-11-03 16:32:20 login_token: 042 from 127.0.0.1
