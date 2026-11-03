@@ -118,6 +118,25 @@ translated, the layout mirrors (left becomes right), notices move to the other c
 and Persian text is drawn in **Vazir** (falling back through `Vazirmatn`, `Vazir FD`,
 `Noto Sans Arabic`, `Tahoma` - whatever is installed). The choice is remembered.
 
+What the mirror covers, because a word that is not moved is a word that disappears:
+
+* every page, every floating panel (admin, invite) and every notice card;
+* rows built *after* the switch - room rows, player cards, friend rows - caught by the
+  slow pass in `tick()`;
+* the inside of scroll lists (Rooms, Players, Friends, Admin panel): customtkinter builds
+  them as a canvas holding a frame, and the frame's rows are mirrored while the canvas,
+  the scrollbar and the caption are left exactly where customtkinter put them;
+* grid columns *and* the column that stretches, so a mirrored row keeps its shape instead
+  of opening a gap in the middle;
+* log lines and system chat lines, which are plain text and are translated as they land -
+  a player's own message is never rewritten;
+* Persian lines name the thing before its count (`عضو: ۲`, not `۲ عضو`), because Tk sends
+  a number that opens a right-to-left line to the far end of it.
+
+Only the geometry managers this app uses itself are touched (`_box`/`_glass` in
+`vplan42.py`): a button's own label, an entry's own box and a segmented switch's own
+buttons belong to customtkinter and are never re-packed.
+
 ---
 
 ## Building the exe

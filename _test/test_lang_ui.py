@@ -7,7 +7,7 @@ The real window is built, signed in with a fake link and switched to Persian
 for real. A string that only got translated half way, or a panel that stayed on
 the wrong side of the screen, fails here.
 """
-import ctypes, os, sys, time
+import ctypes, os, re, sys, time
 import tkinter.font as tkfont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -87,6 +87,25 @@ def pens(parent):
     return out
 
 
+def managed(app):
+    """Every widget on screen by its Tk path, with the manager that holds it. A language
+    switch must never take that away: a widget without a manager is drawn nowhere, which is
+    how a Persian word used to simply disappear."""
+    out = {}
+
+    def walk(w, path):
+        for c in w.winfo_children():
+            p = path + "/" + c._w
+            out[p] = c.winfo_manager()
+            walk(c, p)
+    walk(app, "main")
+    return out
+
+
+def lost(before, after):
+    return [p for p, m in before.items() if m and after.get(p, m) == ""]
+
+
 def main():
     for junk in JUNK:
         try:
@@ -127,6 +146,7 @@ def main():
           app.seg_lang.pack_info()["side"] == "left")
     app.select_tab("start")
 
+    held = managed(app)          # English arrangement, before anything turns around
     app.seg_lang.set("فارسی")
     app.set_lang(app.seg_lang.get())
     app.update_idletasks()
@@ -173,6 +193,44 @@ def main():
           app.seg_lang.pack_info()["side"] == "right")
     app.select_tab("start")
 
+    # 4c. the mirror must move words, never erase them
+    gone = lost(held, managed(app))
+    check("turning to Persian leaves every widget held by a manager", not gone, str(gone[:4]))
+    check("the mirror only ever names options the manager takes",
+          all(set(vp.mirror_of({"side": "left", "anchor": "w", "sticky": "ew",
+                               "column": 0, "padx": (4, 0)}, m, True, 2)) <= vp._OPTS[m]
+              for m in ("pack", "grid", "place")))
+    check("a scroll list keeps its own glass where customtkinter put it",
+          app.plist._parent_canvas.winfo_manager() == "grid"
+          and int(app.plist._parent_canvas.grid_info()["column"]) == 0,
+          str(app.plist._parent_canvas.grid_info()))
+
+    # 4d. a room row is built on a grid, so its columns and its slack both cross over
+    app.on_my_rooms([{"id": 7, "name": "my room", "my_role": "owner", "limit": 8,
+                      "members": [{"id": 7, "name": "042", "role": "owner",
+                                   "online": True, "vip": "10.77.0.1"}]}])
+    app.mirror_t = 0
+    app.tick()
+    for _ in range(4):
+        app.update_idletasks()
+        app.update()
+    rr, seen = app.room_rows[7], {}
+    for key in ("mark", "name", "info", "host", "enter"):
+        if key in rr and hasattr(rr[key], "grid_info"):
+            seen[key] = int(rr[key].grid_info()["column"])
+    check("the room row keeps its words on the grid",
+          rr["name"].winfo_manager() == "grid" and rr["enter"].winfo_manager() == "grid",
+          str((rr["name"].winfo_manager(), rr["enter"].winfo_manager())))
+    check("the room row's mark leads from the far side",
+          seen["mark"] == max(seen.values()) and seen["enter"] == min(seen.values()), str(seen))
+    check("the column that stretches crosses over with its words",
+          int(rr["frame"].grid_columnconfigure(seen["name"])["weight"]) == 1
+          and int(rr["frame"].grid_columnconfigure(seen["mark"])["weight"]) == 0,
+          str({c: rr["frame"].grid_columnconfigure(c)["weight"] for c in range(4)}))
+    check("the room row is still on screen in Persian",
+          rr["frame"].winfo_manager() == "pack" and rr["name"].winfo_ismapped(),
+          str((rr["frame"].winfo_manager(), rr["name"].winfo_ismapped())))
+
     # 5. rows built after the switch are mirrored too, without closing anything
     app.link.friends_payload = {"friends": [{"name": "sara", "online": True},
                                             {"name": "milad", "online": False}], "requests": []}
@@ -208,9 +266,62 @@ def main():
     check("the ping waits at the far left", ping.pack_info()["side"] == "left",
           str(ping.pack_info()))
 
+    # 5c. the log and the chat are plain text boxes - their lines are translated as they land
+    app.q_put("Left the room")
+    app.chat_add("system", "Not connected", "sys")
+    app.chat_add("milad", "Left the room", "them")     # what a player typed stays as typed
+    app.tick()
+    log = app.logbox.get("1.0", "end")
+    chat = app.chatbox.get("1.0", "end")
+    check("the log answers in Persian", "از اتاق خارج شدید" in log, log[-60:])
+    check("a system line in the chat is Persian", "متصل نیستید" in chat, chat[-60:])
+    check("another player's own words are never rewritten", "Left the room" in chat, chat[-60:])
+
+    # 5d. Persian sentences put the thing before its count, or Tk drops the count off the end
+    lead = re.compile(r"^\s*(?:[۰-۹0-9]|\{(?:n|m|o|on|total|limit|count)\})")
+    opens = [k for k, v in vp.TR.items() if v and lead.match(v)]
+    check("no Persian line opens with a number", not opens, str(opens[:3]))
+
+    # 5e. and nothing on a Persian screen stayed English. "English" itself is the name the
+    # language switch offers, in its own tongue; the notice is a message somebody typed.
+    NAMES = {"VLAN", "English", "Test", "hello", "sara", "milad", "negar", "042",
+             "war room", "my room", "friend room"}
+
+    def shown(w, out):
+        for c in w.winfo_children():
+            try:
+                t = str(c.cget("text")).strip()
+            except Exception:
+                t = ""
+            if t and not isinstance(c, vp.ctk.CTkEntry):
+                out.add(t)
+            shown(c, out)
+        return out
+
+    def is_english(t):
+        if t in NAMES or vp.has_rtl(t):
+            return False
+        if re.search(r"^[0-9.,: /\-↑↓]+(ms|KB/s|MB/s)[0-9.,: /\-↑↓msKB]*$", t):
+            return False                      # a number with its unit is not a word
+        return bool(re.search(r"[A-Za-z]{3,}", t))
+
+    app.select_tab("room")
+    app.show_admin()
+    app.update_idletasks()
+    on_screen = sorted(t for t in shown(app, set()) if is_english(t))
+    if app.awin and app.awin.winfo_exists():
+        on_screen += [t for t in sorted(shown(app.awin, set())) if is_english(t)]
+    check("a Persian screen holds no English word", not on_screen, str(on_screen[:4]))
+    if app.awin and app.awin.winfo_exists():
+        app.awin.destroy()
+        app.awin = None
+
     # 6. back to English: nothing is left behind
+    fa_seen = managed(app)
     app.set_lang("English")
     app.update_idletasks()
+    check("turning back to English leaves every widget held too",
+          not lost(fa_seen, managed(app)), str(lost(fa_seen, managed(app))[:4]))
     check("English comes back complete",
           [t.split(" · ")[0] for t in tab_texts(app)] == TABS, str(tab_texts(app)))
     check("the side menu is on the left again", side.pack_info()["side"] == "left")
