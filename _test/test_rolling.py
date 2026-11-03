@@ -1,21 +1,25 @@
 # -*- coding: utf-8 -*-
-"""The dice, the room password, and what happens to somebody who guesses.
+"""The dice, the sealed invite code, and what happens to somebody who guesses.
 
     python _test/test_rolling.py
 
-Half of it is pure client maths: the two fields a host would otherwise make
-guessable must come from the OS entropy pool. The other half boots a
-throw-away server on port 45245 and lets a script knock on one room until the
-anti-cracking cooloff slams the door - while a real guest with the link still
-walks in. The real database is never touched.
+Half of it is plain maths on both sides: the room password must come from the OS
+entropy pool, and an invite must come out of the server's own key - a code that
+is a code, not a web link, and one nobody can build without the VPS. The other
+half boots a throw-away server on port 45245 and lets a script knock on one room
+until the anti-cracking cooloff slams the door, while a real guest holding the
+code their friend pasted still walks in. The real database is never touched.
 """
-import base64, json, os, re, shutil, socket, subprocess, sys, tempfile, time
+import base64, json, os, re, secrets, shutil, socket, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, ".."))
 HOST, PORT = "127.0.0.1", 45245
+SHAPE = re.compile(r"[A-Za-z0-9_-]{4}(\.[A-Za-z0-9_-]{1,4})+")
+FORGE = "Abcd.Ef01.ghij.KLMN.opqr.STuv.Wxyz.01"
 
+import vlan42_server as vs          # noqa: E402
 import vplan42 as vp                # noqa: E402
 import test_client as tc            # noqa: E402
 tc.HOST, tc.PORT = HOST, PORT
@@ -56,11 +60,43 @@ def dice_uses_secrets():
         vp.secrets.choice = lambda seq: (seen.append(("pick", len(seq))), seq[0])[1]
         vp.secrets.randbelow = lambda n: (seen.append(("below", n)), 7)[1]
         vp.roll_password()
-        vp.roll_name()
     finally:
         vp.secrets.token_urlsafe, vp.secrets.choice, vp.secrets.randbelow = real
-    return seen == [("bytes", 24), ("pick", len(vp.NAME_WORDS)),
-                    ("pick", len(vp.NAME_WORDS)), ("below", 900)], str(seen)
+    return seen == [("bytes", 24)], str(seen)
+
+
+def invite_checks():
+    key, other = secrets.token_bytes(32), secrets.token_bytes(32)
+    war = {"code": "1a2b3c4d", "pwd": "super-secret-9"}
+    tok = vs.make_invite(war, key)
+    check("an invite is a code, not a link",
+          "://" not in tok and "http" not in tok and SHAPE.fullmatch(tok) is not None, tok)
+    check("the server opens its own code into code + fingerprint",
+          vs.open_invite(tok, key) == ("1a2b3c4d", vs.pwd_fp("super-secret-9")),
+          str(vs.open_invite(tok, key)))
+    check("a code sealed by another server is nothing", vs.open_invite(tok, other) is None)
+    check("the password is not sitting inside the code",
+          "super" not in tok and "secret" not in tok
+          and b"super-secret-9" not in base64.urlsafe_b64decode(tok.replace(".", "") + "=="), tok)
+    check("one wrong character seals the door",
+          vs.open_invite(tok[:-4] + (".AAAA" if not tok.endswith(".AAAA") else ".BBBB"), key) is None)
+    check("a made-up code of the right shape opens nothing", vs.open_invite(FORGE, key) is None)
+    two = [vs.make_invite(war, key) for _ in range(2)]
+    check("two invites for one room are never the same string", two[0] != two[1])
+    check("and both of them still open the same door",
+          all(vs.open_invite(t, key) == ("1a2b3c4d", vs.pwd_fp("super-secret-9")) for t in two))
+    rolled = vs.make_invite({"code": "1a2b3c4d", "pwd": "a-wholly-new-one"}, key)
+    check("a rolled password carries a different fingerprint",
+          vs.open_invite(rolled, key)[1] != vs.open_invite(tok, key)[1])
+
+    bare = tok.replace(".", "")
+    check("the client reads a dotted code", vp.parse_invite(tok) == bare, tok)
+    check("spaces and a leftover deep link still parse",
+          vp.parse_invite(f"  {vp.INVITE_PFX}{tok.replace('.', ' ')} ") == bare)
+    check("a word is not a code", vp.parse_invite("hello my friend") is None)
+    check("an old invite link is not a code any more",
+          vp.parse_invite(vp.INVITE_PFX
+                          + base64.urlsafe_b64encode(b'{"c":"1a2b3c4d","p":"x"}').decode()) is None)
 
 
 def client_checks():
@@ -72,68 +108,69 @@ def client_checks():
     check("no two throws ever match", len(set(pwds)) == len(pwds))
     pool, detail = dice_uses_secrets()
     check("the dice ask the OS pool, never random()", pool is True, detail)
-
-    names = [vp.roll_name() for _ in range(200)]
-    check("the name dice reads word-word-999",
-          all(re.fullmatch(r"[a-z]+-[a-z]+-\d{3}", n) for n in names), names[0])
-    check("every word comes from the list",
-          all(n.split("-")[0] in vp.NAME_WORDS and n.split("-")[1] in vp.NAME_WORDS for n in names))
-    check("the number is always three digits",
-          all(100 <= int(n.rsplit("-", 1)[1]) <= 999 for n in names))
-    check("names vary too", len(set(names)) > 150, str(len(set(names))))
-    check("a name is short enough for the server", all(len(n) <= 32 for n in names))
+    check("the room name is typed, so nothing rolls it", not hasattr(vp, "roll_name"))
 
 
 def main():
     client_checks()
+    invite_checks()
 
     proc, d = boot()
     try:
         host = register("anna")
-        r = host.req("create_room", name=vp.roll_name(), pwd=vp.roll_password())
-        check("a rolled room is accepted", r.get("ok"), str(r))
-        room, code, pwd = r["room"], r["room"]["code"], r["room"]["pwd"]
+        r = host.req("create_room", name="war room", pwd=vp.roll_password())
+        check("a typed room name is accepted",
+              r.get("ok") and r["room"]["name"] == "war room", str(r)[:120])
+        room, code, pwd, invite = r["room"], r["room"]["code"], r["room"]["pwd"], r["invite"]
         check("the room code is 8 hex digits", bool(re.fullmatch(r"[0-9a-f]{8}", code)), code)
-        check("the invite link round-trips to code + password",
-              vp.parse_invite(r["invite"]) == (code, pwd), str(r["invite"]))
+        check("the room payload carries a sealed code too",
+              SHAPE.fullmatch(room.get("invite") or "") is not None, str(room.get("invite"))[:40])
+        check("the code says nothing about the password", pwd not in invite, invite)
 
-        # a lazy host who types his own guessable password is stopped at 6 chars
-        g = register("greg")
-        r = g.req("create_room", name="second room", pwd="abc")
-        check("a room password needs six characters", not r.get("ok")
-              and "min 6" in str(r.get("err")), str(r))
+        # ---- a host who names his room two letters, or types a password of three
+        greg = register("greg")
+        r = greg.req("create_room", name="ab", pwd="a-perfectly-fine-one")
+        check("a room name needs three characters",
+              not r.get("ok") and "min 3" in str(r.get("err")), str(r))
+        r = greg.req("create_room", name="second room", pwd="abc")
+        check("a room password needs six characters",
+              not r.get("ok") and "min 6" in str(r.get("err")), str(r))
 
-        # ---- the cracker
-        wrong = [g.req("join_room", code=code, pwd=f"guess{i}") for i in range(5)]
+        # ---- the cracker: six knocks in ten minutes and the door stops answering
+        wrong = [greg.req("join_room", code=code, pwd=f"guess{i}") for i in range(5)]
         check("five guesses each get the same plain no",
               all(not x.get("ok") for x in wrong)
               and len({x.get("err") for x in wrong}) == 1, str(wrong[-1]))
-        r = g.req("join_room", code="ffffffff", pwd="whatever")
-        check("a code that does not exist answers the same way",
+        r = greg.req("join_room", code="ffffffff", pwd="whatever")
+        check("a room that does not exist answers the same way",
               not r.get("ok") and r.get("err") == wrong[0]["err"], str(r))
-        r = g.req("join_room", code=code, pwd=pwd)
+        r = greg.req("join_room", inv=FORGE)
         check("six misses in a row lock the account out",
               not r.get("ok") and "Too many wrong invites" in str(r.get("err")), str(r))
         check("the lock says how long to wait",
               bool(re.search(r"wait \d+s", str(r.get("err")))), str(r))
-        other = register("zoe")
-        r = other.req("join_room", code=code, pwd="not it")
-        check("an honest account is not punished for it",
+        r = greg.req("join_room", code=code, pwd=pwd)
+        check("even the right answer is refused while locked",
+              not r.get("ok") and "Too many" in str(r.get("err")), str(r))
+        zoe = register("zoe")
+        r = zoe.req("join_room", inv=FORGE)
+        check("a forged code is as plain a no as a wrong password",
               not r.get("ok") and r.get("err") == wrong[0]["err"], str(r))
         q = host.req("join_list", room=room["id"])
-        check("the locked-out guest never reached the queue",
+        check("not one of them ever reached the queue",
               q.get("ok") and len(q.get("requests", [])) == 0, str(q))
 
         # ---- and somebody who mistypes but stops in time
         ivan = register("ivan")
         for i in range(3):
-            ivan.req("join_room", code=code, pwd=f"typo{i}")
-        r = ivan.req("join_room", code=code, pwd=pwd)
-        check("three typos then the real link still opens the door",
+            ivan.req("join_room", inv=invite[:-5] + f".{i}abc")
+        r = ivan.req("join_room", inv=invite)
+        check("three typos then the real code still opens the door",
               r.get("ok") and r.get("pending"), str(r))
         q = host.req("join_list", room=room["id"])
-        check("the host sees exactly one knock",
-              q.get("ok") and len(q.get("requests", [])) == 1, str(q))
+        knocks = [x for x in (q.get("requests") or []) if x.get("name") == "ivan"]
+        check("the host sees exactly one knock from ivan",
+              q.get("ok") and len(knocks) == 1, str(q))
         check("the host lets him in",
               host.req("join_resp", room=room["id"], user=ivan.user["id"], accept=True).get("ok"))
         st = ivan.drain_push("room_state", timeout=6)
@@ -141,8 +178,8 @@ def main():
         # a fresh miss after a hit starts the count over from one
         for i in range(4):
             ivan.req("join_room", code=code, pwd=f"again{i}")
-        r = ivan.req("join_room", code=code, pwd=pwd)
-        check("a good invite wipes the earlier misses",
+        r = ivan.req("join_room", inv=invite)
+        check("a good code wipes the earlier misses",
               r.get("ok") and "Too many" not in str(r), str(r))
 
         print()

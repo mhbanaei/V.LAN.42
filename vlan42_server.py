@@ -14,7 +14,8 @@ the low, stable ping of your VPS instead of relying on public MQTT brokers and N
 Run:   python vlan42_server.py            (config in vlan42_server.json, DB in vlan42_data/)
 coded by Hossein & Erfan  -  https://github.com/mhbanaei
 """
-import os, sys, json, time, socket, sqlite3, secrets, hashlib, base64, struct, threading, traceback
+import os, sys, json, time, socket, sqlite3, secrets, hashlib, base64, struct, re
+import threading, traceback
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -26,7 +27,6 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CFG_FILE = os.path.join(APP_DIR, "vlan42_server.json")
 DATA_DIR = os.path.join(APP_DIR, "vlan42_data")
 DB_FILE = os.path.join(DATA_DIR, "db.sqlite")
-LOG_FILE = os.path.join(APP_DIR, "vlan42_server.log")
 
 MAX_ROOMS_PER_USER = 3
 DEFAULT_LIMIT = 16
@@ -37,24 +37,14 @@ PERMS = ("kick", "ban", "unban", "limit", "approve")
 JOIN_TRY_LIMIT = 6            # wrong invites/passwords per account before a cooloff
 JOIN_COOLDOWN = 120           # seconds
 JOIN_WINDOW = 600             # the tries that count are the last ten minutes
-INVITE_PREFIX = "vlan42://join/"
+INVITE_PFX = "vlan42://join/"    # only for the OS deep link; the code itself is not a link
+INVITE_AAD = b"vlan42-invite"     # a sealed code is valid as an invite and as nothing else
 PUBLIC_HOST = "v42.ir"          # the address players dial; point its A record at this VPS
 
-_logf = None
-_log_lock = threading.Lock()
-
-
 def log(msg):
-    line = time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg)
-    print(line, flush=True)
-    global _logf
-    with _log_lock:
-        try:
-            if _logf is None:
-                _logf = open(LOG_FILE, "a", encoding="utf-8", buffering=1)
-            _logf.write(line + "\n")
-        except OSError:
-            _logf = False
+    """The console is the only place a server writes: start_server.bat keeps the window open
+    (and can redirect it wherever the team likes). Nothing is left behind as a log file."""
+    print(time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg), flush=True)
 
 
 def load_cfg():
@@ -63,6 +53,69 @@ def load_cfg():
             return json.load(f)
     except Exception:
         return {}
+
+
+# --------------------------------------------------------------- invite codes
+# An invite is a sealed note, not a link. The server keeps one random key that never
+# leaves the VPS; a code is the room code plus a fingerprint of its password, sealed with
+# AES-GCM under that key. Nobody outside the server can read one, and nobody can make a
+# code up: guessing the 128-bit tag is the only way in, and the cooloff says no long
+# before that becomes a plan. Re-rolling a password retires every code handed out before.
+
+def invite_key(cfg):
+    """The one key that mints codes: made on the first run, kept in the config after."""
+    raw = str(cfg.get("invite_key") or "")
+    if raw:
+        try:
+            k = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+            if len(k) == 32:
+                return k
+        except Exception:
+            pass
+    k = secrets.token_bytes(32)
+    cfg["invite_key"] = base64.urlsafe_b64encode(k).decode().rstrip("=")
+    try:
+        saved = load_cfg()                     # keep whatever the team already typed in
+        saved["invite_key"] = cfg["invite_key"]
+        with open(CFG_FILE, "w", encoding="utf-8") as f:
+            json.dump(saved, f, indent=2)
+    except OSError:
+        log("invite key: the config is unwritable, so codes die with this run")
+    return k
+
+
+def pwd_fp(pwd):
+    return hashlib.sha256(str(pwd).encode()).digest()[:6]
+
+
+def unseal_text(text):
+    """A code as it was pasted - with dots, spaces, or a leftover deep link - to bare base64.
+    Only characters that can never be part of a code are dropped: "-" belongs to the alphabet."""
+    s = str(text or "").strip()
+    if INVITE_PFX in s:
+        s = s.split(INVITE_PFX, 1)[1]
+    return "".join(ch for ch in s if ch not in " \t\r\n.:|,")
+
+
+def make_invite(r, key):
+    raw = r["code"].encode() + b"|" + pwd_fp(r["pwd"])
+    nonce = secrets.token_bytes(12)
+    sealed = base64.urlsafe_b64encode(nonce + AESGCM(key).encrypt(nonce, raw, INVITE_AAD))
+    token = sealed.decode().rstrip("=")
+    return ".".join(token[i:i + 4] for i in range(0, len(token), 4))
+
+
+def open_invite(text, key):
+    """(room code, password fingerprint) out of a pasted code, or None if it is not ours."""
+    raw = unseal_text(text)
+    if not (48 <= len(raw) <= 200) or not re.fullmatch(r"[A-Za-z0-9_-]+", raw):
+        return None
+    try:
+        blob = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+        code, fp = AESGCM(key).decrypt(blob[:12], blob[12:], INVITE_AAD).split(b"|", 1)
+        return code.decode(), fp
+    except Exception:
+        return None
 
 
 # ------------------------------------------------------------------ database
@@ -143,6 +196,7 @@ class Server:
         self.ep_users = {}         # (ip,port) -> user_id
         self.tokens = {}           # raw 16-byte token -> user_id (cache)
         self.join_fails = []       # [(user_id, when)] - the anti-guessing counter
+        self.invkey = invite_key(cfg)
         self.udp_ready = False
 
     # ---------------- helpers
@@ -269,14 +323,14 @@ class Server:
                             "online": u["id"] in online})
         return {"id": r["id"], "code": r["code"], "name": r["name"], "pwd": r["pwd"],
                 "key": r["roomkey"], "limit": r["member_limit"], "members": members,
+                "invite": make_invite(r, self.invkey),
                 "my_role": me["role"] if me else None,
                 "my_perms": json.loads(me["perms"] or "{}") if me else {},
                 # only the people who can answer see that a queue exists
                 "pending": len(self.pending(rid)) if self.can(uid, rid, "approve") else 0}
 
     def make_invite(self, r):
-        raw = json.dumps({"c": r["code"], "p": r["pwd"]}, separators=(",", ":")).encode()
-        return INVITE_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        return make_invite(r, self.invkey)
 
     def can(self, uid, rid, perm):
         me = self.member_row(rid, uid)
@@ -289,7 +343,7 @@ class Server:
         return False
 
     def cooloff(self, uid, now):
-        """Seconds an account must wait before it may try another invite link.
+        """Seconds an account must wait before it may try another invite code.
         Six misses in ten minutes is a human typo; more is a script."""
         with self.lock:
             self.join_fails = [(u, t) for (u, t) in self.join_fails if now - t < JOIN_WINDOW]
@@ -358,18 +412,21 @@ class Server:
 
     def do_join_room(self, c, m):
         uid = c.user["id"]
-        code = (m.get("code") or "").strip()
-        pwd = m.get("pwd") or ""
         now = time.time()
         wait = self.cooloff(uid, now)
         if wait:
             return {"t": "join_room", "ok": False,
                     "err": f"Too many wrong invites - wait {wait}s and try again"}
-        r = self.room_by_code(code)
-        if not r or pwd != r["pwd"]:
+        # a sealed code is the normal way in; typing code + password by hand still works,
+        # and both paths end in the same fingerprint check so neither leaks which rooms exist
+        got = open_invite(m["inv"], self.invkey) if m.get("inv") else None
+        if got is None and (m.get("code") or "").strip():
+            got = (str(m["code"]).strip(), pwd_fp(m.get("pwd") or ""))
+        r = self.room_by_code(got[0]) if got else None
+        if not r or pwd_fp(r["pwd"]) != got[1]:
             # one answer for both cases: nothing here tells a script which codes exist
             self.mark_fail(uid, now)
-            return {"t": "join_room", "ok": False, "err": "Wrong invite link or room password"}
+            return {"t": "join_room", "ok": False, "err": "Wrong invite code or room password"}
         self.clear_fails(uid)
         if self.is_banned(r["id"], uid):
             return {"t": "join_room", "ok": False, "err": "You are banned from this room"}
@@ -652,7 +709,7 @@ class Server:
         if not r or not self.member_row(rid, uid):
             return {"t": "invite", "ok": False, "err": "You are not in that room"}
         self.push_user(target["id"], {"t": "invite", "from": c.user["username"], "room": r["name"],
-                                      "code": r["code"], "pwd": r["pwd"]})
+                                      "code": r["code"], "token": self.make_invite(r)})
         return {"t": "invite", "ok": True}
 
     # ---------------- UDP relay

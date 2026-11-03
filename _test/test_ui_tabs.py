@@ -14,7 +14,7 @@ import customtkinter as ctk  # noqa: E402
 import vplan42 as vp         # noqa: E402
 
 PASS, FAIL = [], []
-JUNK = ("vlan42.json", "vlan42.log", "vlan42_hang.txt", "vlan42.json.tmp")
+JUNK = ("vlan42.json", "vlan42.json.tmp")      # the app leaves no log file behind
 
 
 def check(name, cond, extra=""):
@@ -43,6 +43,10 @@ class FakeLink:
             return {"t": t, "ok": True, "ts": time.time(), "delivered": self.delivered}
         if t == "add_friend":
             return {"t": t, "ok": True, "accepted": False, **self.friends_payload}
+        if t == "create_room":
+            return {"t": t, "ok": False, "err": "only here to catch what was sent"}
+        if t == "join_room":
+            return {"t": t, "ok": False, "err": "Wrong invite code or room password"}
         return {"t": t, "ok": True}
 
     def close(self):
@@ -120,6 +124,16 @@ def drain(app, secs=3.0):
     return seen
 
 
+def wait_sent(app, t, secs=3.0):
+    """Wait for a request the worker thread put on the wire, then flush the log queue."""
+    end = time.time() + secs
+    while time.time() < end:
+        if any(k == t for k, _ in app.link.sent):
+            break
+        time.sleep(0.02)
+    app.tick()
+
+
 def main():
     for junk in JUNK:
         try:
@@ -138,9 +152,17 @@ def main():
           images(app.pg_login) and images(app.nav))
     check("logo on the friends and logs headers",
           images(app.pg_friends) and images(app.pg_logs))
-    check("wordmark is VLAN + picture + 42",
-          {"VLAN", "42"} <= set(labels(app.pg_start)) <= {"VLAN", "42", "|"} | set(labels(app.pg_start))
-          and {"VLAN", "42"} <= set(labels(app.nav)))
+    check("the tab bar writes VLAN and lets the picture be the 42",
+          "VLAN" in labels(app.nav) and "42" not in labels(app.nav) and images(app.nav),
+          str(labels(app.nav)[:4]))
+    check("the landing menu shows its mark once, with no second 42",
+          "VLAN" in labels(app.pg_start) and "42" not in labels(app.pg_start),
+          str(labels(app.pg_start)[:6]))
+    twice = [n for n, page in (("rooms", app.pg_start), ("login", app.pg_login),
+                               ("friends", app.pg_friends), ("logs", app.pg_logs),
+                               ("room", app.pg_room), ("settings", app.pg_settings))
+             if "42" in labels(page)]
+    check("no page writes a 42 of its own next to the picture", not twice, str(twice))
     old = [t for w in (app.pg_start, app.pg_login, app.pg_friends, app.pg_logs, app.pg_room)
            for t in labels(w) if "V.Lan.42" in t]
     check("no panel still says V.Lan.42", not old, str(old))
@@ -160,6 +182,9 @@ def main():
     sep = [t for t in labels(app.nav) if t == "|"]
     check("tabs split by green bars, never painted green", len(sep) == 4
           and app.tabs["start"][1].cget("fg_color") == "transparent", str(sep))
+    check("no red circle sits on a tab before anything arrives",
+          all(b.winfo_manager() == "" and str(b.cget("text")) == "" for (_, _, b) in app.tabs.values()),
+          str([(k, b.winfo_manager(), b.cget("text")) for k, (_, _, b) in app.tabs.items()]))
     check("no Logs/Friends/Logout buttons left on the page",
           not [b for b in buttons(app.pg_start)
                if b.cget("text") in ("Logs", "Friends", "Logout")])
@@ -170,6 +195,57 @@ def main():
     check("tab bar shown after login", app.nav.winfo_manager() == "pack" and app.page == "start")
     check("account name on the bar", app.lbl_nav_acct.cget("text") == "042")
     check("Room tab hidden outside a room", app.tabs["room"][0].winfo_manager() == "")
+
+    # 4b. the host writes the room name; only the password comes from the dice
+    check("the room name is an empty field you type yourself", app.h_room.value() == "",
+          repr(app.h_room.value()))
+    check("the password is already rolled when the page opens",
+          len(app.h_pwd.get()) == 32 and app.h_room.value() == "", repr(app.h_pwd.get()))
+    app.roll()
+    check("the dice throws a 32-character password", len(app.h_pwd.get()) == 32,
+          str(len(app.h_pwd.get())))
+    check("the dice never names the room", app.h_room.value() == "")
+    app.h_room.set("war room")
+    first = app.h_pwd.get()
+    app.roll()
+    check("rolling again keeps your name and changes only the secret",
+          app.h_room.value() == "war room" and app.h_pwd.get() != first, app.h_room.value())
+    app.h_pwd.delete(0, "end")
+    app.create_room()
+    app.tick()
+    check("a room without a password is stopped before the wire",
+          not [kw for t, kw in app.link.sent if t == "create_room"], str(app.link.sent[-3:]))
+    check("and it is said out loud", "Room name and password are required" in app.logbox.get("1.0", "end"),
+          app.logbox.get("1.0", "end")[-90:])
+    app.roll()
+    app.create_room()
+    wait_sent(app, "create_room")
+    sent = [(t, kw) for t, kw in app.link.sent if t == "create_room"]
+    check("creating sends the name exactly as typed",
+          len(sent) == 1 and sent[0][1]["name"] == "war room", str(sent))
+    check("with the rolled password beside it", sent and sent[0][1]["pwd"] == app.h_pwd.get(),
+          str(sent[0][1] if sent else ""))
+
+    # 4c. joining takes a sealed code, never a link the client can read
+    app.g_link.delete(0, "end")
+    app.g_link.insert("end", "vlan42://join/" + "abcd." * 15)
+    app.join_link()
+    wait_sent(app, "join_room")
+    joined = [kw for t, kw in app.link.sent if t == "join_room"]
+    check("an invite is sent as one sealed token, with no address or password in it",
+          len(joined) == 1 and set(joined[0]) == {"inv"}, str(joined))
+    check("the dots are stripped, the code itself is handed over unread",
+          joined and joined[0]["inv"] == "abcd" * 15, str(joined[0]["inv"]) if joined else "")
+    app.g_link.delete(0, "end")
+    app.g_link.insert("end", "https://v42.ir/join/myroom")
+    app.join_link()
+    time.sleep(0.2)
+    check("a web address is not an invite code",
+          len([1 for t, kw in app.link.sent if t == "join_room"]) == 1, str(app.link.sent[-2:]))
+    app.tick()
+    check("and the join field says what belongs there",
+          str(app.g_link.cget("placeholder_text")) == "xxxx.xxxx.xxxx...",
+          str(app.g_link.cget("placeholder_text")))
 
     # 5. a friend request arrives as a notification on the Friends & Chat tab
     sara = {"name": "sara", "online": False}
@@ -249,6 +325,64 @@ def main():
     check("room page shows the role", app.page == "room"
           and app.lbl_role.cget("text") == vp.ROLE_BADGE["owner"][0], str(app.lbl_role.cget("text")))
 
+    # 11c. Players: one solid card per person, their ping on it, the line copies their IP
+    n = app.node
+    n.room["members"] = [{"id": 7, "name": "042", "role": "owner", "online": True, "vip": "10.77.0.1"},
+                         {"id": 8, "name": "milad", "role": "member", "online": True, "vip": "10.77.0.2"},
+                         {"id": 9, "name": "sara", "role": "member", "online": False, "vip": "10.77.0.3"}]
+    n.peers = {8: {"id": 8, "name": "milad", "vip": "10.77.0.2", "online": True, "rtt": 34,
+                   "timed_out": False, "last": time.time()},
+               9: {"id": 9, "name": "sara", "vip": "10.77.0.3", "online": False, "rtt": None,
+                   "timed_out": False, "last": time.time()}}
+    n.srv_rtt = 21
+    app.role_key = None
+    app.update_room(n)
+    app.update_idletasks()
+    cards = [w for w in app.plist.winfo_children() if isinstance(w, ctk.CTkFrame)]
+    check("every player gets a card of their own", len(cards) == 3, str(len(cards)))
+    check("a card is one line tall, not a box",
+          all(6 < c.winfo_reqheight() < 45 for c in cards),
+          str([c.winfo_reqheight() for c in cards]))
+    r7, nm7, info7, ping7, dot7 = app.rows[7]
+    check("my own line says the round trip to the VPS", ping7.cget("text") == "21 ms",
+          ping7.cget("text"))
+    check("names are written plain, not bold", "bold" not in str(nm7.cget("font")),
+          str(nm7.cget("font")))
+    check("a friend's line carries his own ping", app.rows[8][3].cget("text") == "34 ms",
+          app.rows[8][3].cget("text"))
+    check("whoever is away is grey and says offline",
+          app.rows[9][4].cget("text_color") == vp.GRAY and app.rows[9][3].cget("text") == "offline",
+          f"{app.rows[9][4].cget('text_color')} {app.rows[9][3].cget('text')}")
+    check("the header counts everyone present", app.lbl_count.cget("text") == "2 online",
+          app.lbl_count.cget("text"))
+    app.copy_peer_ip(7)
+    check("clicking my own line copies my IP", app.clipboard_get() == "10.77.0.1",
+          repr(app.clipboard_get()))
+    app.copy_peer_ip(8)
+    check("clicking a player copies his virtual IP", app.clipboard_get() == "10.77.0.2",
+          repr(app.clipboard_get()))
+    drain(app)
+    app.tick()
+    check("the copy is said out loud", "10.77.0.2 copied" in app.logbox.get("1.0", "end"),
+          app.logbox.get("1.0", "end")[-90:])
+
+    # 11d. one person standing inside is still a room attached to the server
+    members, peers = list(n.room["members"]), dict(n.peers)
+    n.room["members"] = [m for m in members if m["id"] == 7]
+    n.peers = {}
+    app.role_key = None
+    app.update_room(n)
+    app.update_idletasks()
+    check("a room of one says connected, not waiting",
+          app.lbl_status.cget("text") == "● Connected", app.lbl_status.cget("text"))
+    check("and counts the one who is inside", app.lbl_count.cget("text") == "1 online",
+          app.lbl_count.cget("text"))
+    check("the lonely card still shows the virtual IP", app.rows[7][2].cget("text") == "10.77.0.1",
+          app.rows[7][2].cget("text"))
+    n.room["members"], n.peers = members, peers
+    app.role_key = None
+    app.update_room(n)
+
     # 11b. "X is typing ..." on both the room chat and a private thread
     app.on_event({"t": "typing", "room": app.node.rid, "from": "sara"})
     app.on_event({"t": "typing", "room": app.node.rid, "from": "milad"})
@@ -295,7 +429,8 @@ def main():
     # 12. Logs is a page too and carries the same header
     app.select_tab("logs")
     check("logs page with the brand header", app.page == "logs"
-          and {"VLAN", "42", "Logs"} <= set(labels(app.pg_logs)))
+          and {"VLAN", "Logs"} <= set(labels(app.pg_logs))
+          and "42" not in labels(app.pg_logs), str(labels(app.pg_logs)[:4]))
     app.q_put("a line for the log")
     app.tick()
     check("log lines land in the page", "a line for the log" in app.logbox.get("1.0", "end"))
@@ -306,8 +441,9 @@ def main():
     app.brand(top, "Admin panel")
     app.panel_head(top, "Roles and permissions")
     check("panel title uses the app name", top.title() == "V LAN 42 - Admin panel", top.title())
-    check("panel header carries the wordmark",
-          {"VLAN", "42", "Roles and permissions"} <= set(labels(top)), str(labels(top)))
+    check("panel header carries the wordmark once",
+          {"VLAN", "Roles and permissions"} <= set(labels(top))
+          and "42" not in labels(top), str(labels(top)))
     check("panel header carries the logo picture", bool(images(top)), str(labels(top)))
     top.destroy()
 
@@ -320,18 +456,21 @@ def main():
     check("logout clears the badge", app.tabs["friends"][2].winfo_manager() == "")
 
     app.closing = True
-    for f in (app.logf, app.hangf):
-        try:
-            if f:
-                f.close()
-        except OSError:
-            pass
+    if app.hangf:
+        app.hangf.close()
     app.destroy()
     for junk in JUNK:
         try:
             os.remove(os.path.join(vp.APP_DIR, junk))
         except OSError:
             pass
+    try:
+        os.remove(vp.HANG_FILE)
+    except OSError:
+        pass
+    check("a run leaves no log file next to the app",
+          not os.path.exists(os.path.join(vp.APP_DIR, "vlan42.log"))
+          and not os.path.exists(os.path.join(vp.APP_DIR, "vlan42_server.log")))
     print(f"\nRESULT: {len(PASS)} passed, {len(FAIL)} failed")
     return 0 if not FAIL else 1
 

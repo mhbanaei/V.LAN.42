@@ -7,7 +7,8 @@ The real window is built, signed in with a fake link and switched to Persian
 for real. A string that only got translated half way, or a panel that stayed on
 the wrong side of the screen, fails here.
 """
-import ctypes, os, sys
+import ctypes, os, sys, time
+import tkinter.font as tkfont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -31,12 +32,15 @@ def tab_texts(app):
 
 
 def halves(parent):
-    """The two words of the wordmark, however deep they are nested."""
+    """The two pieces of the wordmark - the word and the picture that is the 42 -
+    however deep they are nested."""
     out = {}
     for c in parent.winfo_children():
         t = str(c.cget("text")) if isinstance(c, vp.Label) else ""
-        if t in ("VLAN", "42"):
-            out[t] = c
+        if t == "VLAN":
+            out["VLAN"] = c
+        elif isinstance(c, vp.Label) and not t and c.cget("image"):
+            out["42"] = c
         else:
             out.update(halves(c))
     return out
@@ -60,6 +64,29 @@ def placed(card):
     return float(info["relx"]), info["anchor"]
 
 
+def pen(w):
+    """The font family one widget was actually handed."""
+    try:
+        f = w.cget("font")
+    except Exception:
+        return ""
+    if isinstance(f, vp.ctk.CTkFont):
+        return str(f.cget("family"))
+    if isinstance(f, (tuple, list)) and f:
+        return str(f[0])
+    return ""
+
+
+def pens(parent):
+    out = set()
+    for c in parent.winfo_children():
+        p = pen(c)
+        if p:
+            out.add(p)
+        out |= pens(c)
+    return out
+
+
 def main():
     for junk in JUNK:
         try:
@@ -77,15 +104,17 @@ def main():
     tu.drain(app)
     app.update_idletasks()
     side = app.pg_start.winfo_children()[0]
-    word = halves(side)
+    word = halves(app.nav)
 
     # 1. the app is built in English and everything hangs on the left
     check("signed in and reading English", vp.LANG[0] == "en" and app.page == "start")
     check("the side menu hugs the left edge", side.pack_info()["side"] == "left")
     check("tabs read English", tab_texts(app) == TABS, str(tab_texts(app)))
-    check("the wordmark is VLAN then 42, left to right",
+    check("the wordmark is VLAN then the 42 picture, left to right",
           set(word) == {"VLAN", "42"} and word["42"].pack_info()["side"] == "left"
-          and word["42"].pack_info()["padx"] == (5, 0), str(word["42"].pack_info()))
+          and word["42"].pack_info()["padx"] == (6, 0), str(word["42"].pack_info()))
+    check("the big mark in the menu is not followed by a second 42",
+          "42" not in tu.labels(side) and "VLAN" in tu.labels(side), str(tu.labels(side)[:6]))
     note = app.notify("Test", "hello")
     app.layout_notes()
     check("a notice lands bottom-right in English", placed(note) == (1.0, "se"), str(placed(note)))
@@ -114,18 +143,28 @@ def main():
     check("the language button stayed on the choice you clicked", app.seg_lang.get() == "فارسی")
     check("the choice is remembered in the config file", vp.load_cfg().get("lang") == "fa")
 
+    # 3b. Persian: the pen - a font that exists here and can draw Arabic letters
+    have = {n.lower() for n in tkfont.families(app)}
+    tag = [c for c in side.winfo_children()
+           if isinstance(c, vp.Label) and "شبکه" in str(c.cget("text"))][0]
+    check("the Persian pen is picked from the installed list, in order",
+          app.fa_font.lower() == next((f for f in vp.FA_FONTS if f.lower() in have), "").lower(),
+          str(app.fa_font))
+    check("the pen the app writes with is on this machine", vp.FONT.lower() in have, str(vp.FONT))
+    check("every word on the landing page switched pen", pens(app.pg_start) == {vp.FONT},
+          str(pens(app.pg_start)))
+    check("the tagline is drawn in the Persian font", pen(tag) == vp.FONT, pen(tag))
+
     # 4. Persian: the geometry, mirrored for real
     check("the side menu moved to the right edge", side.pack_info()["side"] == "right")
-    check("the wordmark now reads 42 then VLAN",
-          word["42"].pack_info()["side"] == "right" and word["42"].pack_info()["padx"] == (0, 5),
+    check("the wordmark now reads the 42 picture then VLAN",
+          word["42"].pack_info()["side"] == "right" and word["42"].pack_info()["padx"] == (0, 6),
           str(word["42"].pack_info()))
     anchors = [c.pack_info().get("anchor") for c in side.winfo_children()
                if isinstance(c, vp.Label) and c.pack_info().get("anchor")]
     check("anchor w became anchor e", anchors and set(anchors) == {"e"}, str(anchors))
     check("the space that followed a word now precedes it",
           app.lbl_acct_name.pack_info()["padx"] == (0, 7), str(app.lbl_acct_name.pack_info()["padx"]))
-    tag = [c for c in side.winfo_children()
-           if isinstance(c, vp.Label) and "شبکه" in str(c.cget("text"))][0]
     check("Persian text is right-justified", tag.cget("justify") == "right", tag.cget("justify"))
     app.layout_notes()
     check("a notice lands bottom-left in Persian", placed(note) == (0.0, "sw"), str(placed(note)))
@@ -149,35 +188,62 @@ def main():
     check("the tabs are still Persian after a rebuild",
           all(vp.has_rtl(t) for t in tab_texts(app) if t != "Room"), str(tab_texts(app)))
 
+    # 5b. the Players cards stand in a Persian line too
+    n = tu.FakeNode()
+    n.room["members"] = [{"id": 7, "name": "042", "role": "owner", "online": True, "vip": "10.77.0.1"},
+                         {"id": 8, "name": "milad", "role": "member", "online": True, "vip": "10.77.0.2"}]
+    n.peers = {8: {"id": 8, "name": "milad", "vip": "10.77.0.2", "online": True, "rtt": 34,
+                   "timed_out": False, "last": time.time()}}
+    n.srv_rtt = 21
+    app.node, app.room_name = n, "war room"
+    app.select_tab("room")
+    app.update_room(n)
+    app.mirror_t = 0
+    app.tick()
+    card, _, _, ping, dot = app.rows[8]
+    check("a Persian player card is still one line tall", card.winfo_reqheight() < 45,
+          str(card.winfo_reqheight()))
+    check("the status dot leads the line from the right", dot.pack_info()["side"] == "right",
+          str(dot.pack_info()))
+    check("the ping waits at the far left", ping.pack_info()["side"] == "left",
+          str(ping.pack_info()))
+
     # 6. back to English: nothing is left behind
     app.set_lang("English")
     app.update_idletasks()
-    check("English comes back complete", tab_texts(app) == TABS, str(tab_texts(app)))
+    check("English comes back complete",
+          [t.split(" · ")[0] for t in tab_texts(app)] == TABS, str(tab_texts(app)))
     check("the side menu is on the left again", side.pack_info()["side"] == "left")
     check("the wordmark reads left to right again",
-          word["42"].pack_info()["side"] == "left" and word["42"].pack_info()["padx"] == (5, 0))
+          word["42"].pack_info()["side"] == "left" and word["42"].pack_info()["padx"] == (6, 0))
     check("the late friend rows turn back too",
           rail_dot(app) is not None and rail_dot(app).pack_info()["side"] == "left",
           str(rail_dot(app).pack_info()) if rail_dot(app) else "no row")
+    check("the player cards lead from the left again",
+          app.rows[8][4].pack_info()["side"] == "left", str(app.rows[8][4].pack_info()))
     check("justify follows back", tag.cget("justify") == "left")
+    check("English takes its own pen back",
+          vp.FONT == vp.FONT_EN and pen(tag) == vp.FONT_EN, f"{vp.FONT} / {pen(tag)}")
+    check("no widget is left in the Persian font", pens(app.pg_start) == {vp.FONT_EN},
+          str(pens(app.pg_start)))
     app.layout_notes()
     check("the notice returns to the right corner", placed(note) == (1.0, "se"), str(placed(note)))
     check("the config file says English", vp.load_cfg().get("lang") == "en")
 
     app.drop_note(note)
     app.closing = True
-    for f in (app.logf, app.hangf):
-        try:
-            if f:
-                f.close()
-        except OSError:
-            pass
+    if app.hangf:
+        app.hangf.close()
     app.destroy()
     for junk in JUNK:
         try:
             os.remove(os.path.join(vp.APP_DIR, junk))
         except OSError:
             pass
+    try:
+        os.remove(vp.HANG_FILE)
+    except OSError:
+        pass
     print(f"\nRESULT: {len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
         print("failed:", ", ".join(FAIL))

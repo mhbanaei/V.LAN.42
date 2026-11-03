@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+
+# built output
+build/
+dist/
+
+# live state - never push these
+# vlan42_server.json holds the invite key, vlan42.json is one player's own login
+vlan42_data/
+vlan42_server.json
+vlan42.json
+vlan42_hang.txt
+*.log
+
+# what the protocol test drops next to itself while it runs
+_test/vlan42_server.py
+_test/vlan42_server.json
+_test/vlan42_data/
+_test/__pycache__/

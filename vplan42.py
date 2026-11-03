@@ -46,6 +46,9 @@ MAX_ROOMS = 3
 # team, with one "ip", "domain" or "ip:port" per line - it is tried before the default.
 SERVER_HOSTS = ["v42.ir"]
 SERVER_HOSTS_FILE = "vlan42_servers.txt"
+# The app writes no logs next to itself. Only a freeze report exists, in the system temp
+# dir, read back on the next start and deleted: the Logs page is the place to read anything.
+HANG_FILE = os.path.join(tempfile.gettempdir(), "vlan42_hang.txt")
 PERM_LABELS = {"kick": "Kick", "ban": "Ban", "unban": "Unban", "limit": "Member limit"}
 
 
@@ -900,22 +903,19 @@ class VpsNode:
         return "\n".join(lines)
 
 
-# ----------------------------------------------------------------- invite links
-INVITE_PREFIX = "vlan42://join/"
-
-
-def make_invite(code, pwd):
-    raw = json.dumps({"c": code, "p": pwd}, separators=(",", ":")).encode()
-    return INVITE_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+# ----------------------------------------------------------------- invite codes
+INVITE_PFX = "vlan42://join/"      # the browser hand-off, when somebody forwards a click
 
 
 def parse_invite(text):
-    try:
-        code = text.strip().rstrip("/").split("/")[-1].strip()
-        d = json.loads(base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)))
-        return str(d["c"]), str(d["p"])
-    except Exception:
-        return None
+    """A friend's code in whatever shape it arrives - dotted, spaced, or inside a whole
+    deep link - reduced to the bare sealed token the server opens. None if it is no code.
+    The client never reads a token: only the VPS holds the key that seals them."""
+    s = str(text or "").strip()
+    if INVITE_PFX in s:
+        s = s.split(INVITE_PFX, 1)[1]
+    s = "".join(ch for ch in s if ch not in " \t\r\n.:|,")
+    return s if 48 <= len(s) <= 200 and re.fullmatch(r"[A-Za-z0-9_-]+", s) else None
 
 
 def register_protocol():
@@ -956,26 +956,61 @@ GREEN, YELLOW, RED, GRAY = "#4ecb6a", "#f1c40f", "#e74c3c", "#6b7686"
 NAME_RED = "#ff4d4d"          # the signed-in name
 NAME_DIM = "#6e2323"          # the dark half of its pulse
 GOLD = "#f5c542"
-FONT = "Segoe UI"
+FONT_EN = "Segoe UI"
+FONT = FONT_EN
+# Persian in Segoe UI is a row of disconnected letters, so the language switch swaps the
+# drawing family. Vazir comes first, and it is the plain one on purpose: the FD and WOL
+# variants drop either the Latin or the Persian half, and a family this PC has not got is
+# never picked - that is how a language switch ends up showing nothing at all.
+FA_FONTS = ("Vazir", "Vazirmatn", "Vazir FD", "Noto Sans Arabic", "Tahoma")
 
 
 def has_rtl(text):
     return any("\u0590" <= c <= "\u08ff" or "\ufb1d" <= c <= "\ufdff" or "\ufe70" <= c <= "\ufeff" for c in text)
 
 
-# two short word lists are only there to make the room name pleasant to read;
-# the secret of a room is its password, and that is 192 bits of OS randomness
-NAME_WORDS = ("amber", "falcon", "vertex", "cobalt", "ember", "harbor", "quartz", "raven",
-              "tundra", "willow", "zenith", "onyx", "comet", "delta", "echo", "granite",
-              "orbit", "pixel", "ridge", "saffron", "tidal", "ultra", "vortex", "walnut")
+def pick_fa_font(master):
+    """The first Persian face this machine really has, or "" to stay with the UI font.
+    Only tkinter knows which families are installed, so this waits for the window."""
+    import tkinter.font as tkfont
+    try:
+        have = {n.lower(): n for n in tkfont.families(master)}
+    except Exception:
+        return ""
+    for name in FA_FONTS:
+        if name.lower() in have:
+            return have[name.lower()]
+    return ""
 
 
+def refamily(w, family):
+    """Every widget under w, told which family to draw in. The words they hold are left
+    alone - only the pen changes. customtkinter hands back the font it was given, either a
+    CTkFont object or a plain (family, size, style) tuple, and both ways are updated."""
+    try:
+        f = w.cget("font")
+    except Exception:
+        f = None
+    if isinstance(f, ctk.CTkFont):
+        if f.cget("family") != family:
+            f.configure(family=family)
+    elif isinstance(f, (tuple, list)) and f and str(f[0]) != family:
+        try:
+            w.configure(font=(family,) + tuple(f[1:]))
+        except Exception:
+            pass
+    try:
+        kids = list(w.winfo_children())
+    except Exception:
+        kids = []
+    for k in kids:
+        refamily(k, family)
+
+
+# the host names the room themselves; the secret of a room is its password,
+# and that is 32 characters of OS randomness nobody can guess
 def roll_password():
     return secrets.token_urlsafe(24)      # 32 characters, no guessable pattern
-
-
-def roll_name():
-    return f"{secrets.choice(NAME_WORDS)}-{secrets.choice(NAME_WORDS)}-{secrets.randbelow(900) + 100}"
 
 
 _CLIP_KEYS = {65: "sel", 67: "<<Copy>>", 86: "<<Paste>>", 88: "<<Cut>>"}
@@ -1063,7 +1098,7 @@ TR = {
     "Signing in with the saved session...": "ورود با نشستِ ذخیره‌شده...",
     "Please wait...": "لطفاً صبر کنید...",
     "Remember me on this PC": "مرا در این رایانه به خاطر بسپار",
-    "● Online": "● آنلاین",
+    "● Connected": "● متصل",
     "● Connecting": "● در حال اتصال",
     "● Waiting": "● در انتظار",
     "signed in as": "وارد شده با",
@@ -1075,10 +1110,10 @@ TR = {
     "Create a room": "ساخت اتاق",
     "Join a room": "ورود به اتاق",
     "{n} / {m} rooms": "{n} / {m} اتاق",
-    "No rooms yet - create one or join with an invite link.":
-        "هنوز اتاقی ندارید - یکی بسازید یا با پیوند دعوت وارد شوید.",
-    "Waiting for your friends...\nSend them the invite link.":
-        "در انتظار دوستانتان...\nپیوند دعوت را برایشان بفرستید.",
+    "No rooms yet - create one or join with an invite code.":
+        "هنوز اتاقی ندارید - یکی بسازید یا با کد دعوت وارد شوید.",
+    "Waiting for your friends...\nSend them the invite code.":
+        "در انتظار دوستانتان...\nکد دعوت را برایشان بفرستید.",
     "No friends yet.": "هنوز دوستی ندارید.",
     "Create room": "ساخت اتاق",
     "Room name": "نام اتاق",
@@ -1087,12 +1122,17 @@ TR = {
     "Join": "پیوستن",
     "Enter": "ورود",
     "Invite": "دعوت",
-    "Invite link": "پیوند دعوت",
-    "Invite link from your friend": "پیوند دعوت دوست شما",
-    "vlan42://join/...": "vlan42://join/...",
-    "Copy invite link": "کپی پیوند دعوت",
-    "Session key (already copied to your clipboard):":
-        "کلید نشست (قبلاً در حافظه کپی شده):",
+    "Invite code": "کد دعوت",
+    "Invite code from your friend": "کد دعوت دوست شما",
+    "xxxx.xxxx.xxxx...": "xxxx.xxxx.xxxx...",
+    "Copy invite code": "کپی کد دعوت",
+    "This is not a valid invite code. Ask your friend to send it again.":
+        "این کد دعوت درست نیست. دوباره از دوستتان بخواهید آن را بفرستد.",
+    "There is no invite code yet - enter a room first.":
+        "هنوز کد دعوتی نیست - اول وارد یک اتاق شوید.",
+    "Invite code (already copied to your clipboard):":
+        "کد دعوت (قبلاً در حافظه کپی شده):",
+    "Copy code": "کپی کد",
     "The QR picture needs:  pip install qrcode[pil]":
         "برای ساخت تصویر QR نیاز است به:  pip install qrcode[pil]",
     # ------------------------------------------------- friends
@@ -1155,6 +1195,7 @@ TR = {
     "you host this room": "میزبان این اتاق شما هستید",
     "inside this room": "داخل این اتاق",
     "{who}   ·   {vip}   ·   role: {r}": "{who}   ·   {vip}   ·   مقام: {r}",
+    "{who}   (you)": "{who}   (خودت)",
     "{vip}  ·  no answer since {t}": "{vip}  ·  از {t} بی‌پاسخ",
     "{vip} copied - paste it into the game": "{vip} کپی شد - در بازی آن را بچسبانید",
     "Copied ✓": "کپی شد ✓",
@@ -1590,11 +1631,19 @@ class App(ctk.CTk):
         self.geometry("1000x680")
         self.minsize(920, 620)
         self.configure(fg_color=BG)
-        self.closing, self.last_log, self.logf, self.empty_on = False, "", None, False
+        self.closing, self.last_log, self.empty_on = False, "", False
         self.ui_err_t, self.hangf = 0.0, None
+        self.frozen_before, self.fa_font = "", None
+        # a frozen UI is the one thing worth writing outside the app folder: it lands in the
+        # system temp dir, is read back into the Logs page on the next start, and never stays
         try:
-            hp = os.path.join(APP_DIR, "vlan42_hang.txt")
-            self.hangf = open(hp, "w" if os.path.exists(hp) and os.path.getsize(hp) > 200_000 else "a", buffering=1)
+            if os.path.exists(HANG_FILE) and os.path.getsize(HANG_FILE):
+                with open(HANG_FILE, "r", encoding="utf-8", errors="replace") as f:
+                    old = f.read()[-4000:]
+                os.remove(HANG_FILE)
+                if old.strip():
+                    self.frozen_before = old        # told once the log queue exists
+            self.hangf = open(HANG_FILE, "w", buffering=1)
             self.hangf.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} session start ---\n")
         except OSError:
             self.hangf = None
@@ -1629,15 +1678,17 @@ class App(ctk.CTk):
 
         self.link, self.node, self.busy, self.page = None, None, False, None
         self.q, self.cq, self.uq = queue.Queue(), queue.Queue(), queue.Queue()
+        if self.frozen_before:
+            self.q.put("Last session left a freeze report:\n" + self.frozen_before)
         self.rows, self.room_rows, self.stat = {}, {}, (time.time(), 0, 0)
         self.my_rooms, self.friends = [], {"friends": [], "requests": []}
         self.rooms_empty = None
         self.need_wintun, self.auto_connect = False, False
         self.last_args, self.invite_text, self.err = None, "", ""
         self.room_name, self.my_name = "", ""
-        self.pending_enter = None       # room dict waiting for login
+        self.pending_enter = None       # invite token waiting for login
         self.role_key = None
-        self.invite = None              # {"from","room","code","pwd"}
+        self.invite = None              # {"from","room","token"}
         self.awin = self.iwin = None
         self.admin_tab = "Members"      # which half of the admin panel is showing
         self.jwin = None                # join-request panel
@@ -1677,9 +1728,9 @@ class App(ctk.CTk):
         self.after(60, self.show_main)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         if invite:
-            r = parse_invite(invite)
-            if r:
-                self.pending_enter = r  # (code, pwd): joined automatically after login
+            tok = parse_invite(invite)
+            if tok:
+                self.pending_enter = tok   # sealed until the VPS opens it after login
                 self.err = "Invite loaded - log in to join the room."
 
     def q_put(self, s):
@@ -1736,15 +1787,18 @@ class App(ctk.CTk):
         return h
 
     # ------------------------------------------------------------ top navigation
-    def wordmark(self, parent, sz=16, icon=None, padx=0):
-        """VLAN [picture] 42 - the name with the app icon sitting between the two halves."""
+    def wordmark(self, parent, sz=16, icon=None, padx=0, word_only=False):
+        """VLAN 42. The picture already is the 42, so wherever a 42 is drawn - inside this
+        line or as the big mark above it - the words say VLAN only. Never a second 42."""
         f = ctk.CTkFrame(parent, fg_color="transparent")
         f.pack(side="left", padx=padx)
         Label(f, text="VLAN", font=(FONT, sz, "bold"), text_color=TXT).pack(side="left")
+        if word_only:
+            return f
         if icon:
-            Label(f, image=icon, text="").pack(side="left", padx=(6, 6))
-        Label(f, text="42", font=(FONT, sz, "bold"), text_color=ACC
-                     ).pack(side="left", padx=(0 if icon else 5, 0))
+            Label(f, image=icon, text="").pack(side="left", padx=(6, 0))
+        else:
+            Label(f, text="42", font=(FONT, sz, "bold"), text_color=ACC).pack(side="left", padx=(5, 0))
         return f
 
     def build_nav(self):
@@ -1771,7 +1825,7 @@ class App(ctk.CTk):
             b.pack(side="left")
             badge = Label(holder, text="", font=(FONT, 11, "bold"), text_color="#ffffff",
                                  fg_color=RED, corner_radius=9, width=22, height=20)
-            badge.pack(side="left", padx=(5, 0))
+            # packed only when there is a number to show, so no empty red circle by default
             self.tabs[key] = (holder, b, badge)
         self.tabs["room"][0].pack_forget()
 
@@ -2094,9 +2148,10 @@ class App(ctk.CTk):
             Label(side, image=self.logo_img, text="").pack(anchor="w", padx=26, pady=(30, 0))
         title = ctk.CTkFrame(side, fg_color="transparent")
         title.pack(anchor="w", padx=30, pady=(8, 0) if self.logo_img else (44, 0))
-        self.wordmark(title, 32)
+        self.wordmark(title, 32, word_only=bool(self.logo_img))
+        # 226 = the 290px menu minus its 2x30 padding; without this the Persian tagline is cut
         Label(side, text="Play together over a\nvirtual local network.", font=(FONT, 13),
-                     text_color=MUTED, justify="left").pack(anchor="w", padx=30, pady=(8, 22))
+                     text_color=MUTED, justify="left", wraplength=226).pack(anchor="w", padx=30, pady=(8, 22))
         # "signed in as <name>" - the name is bright red and pulses so you see it is live
         acct = ctk.CTkFrame(side, fg_color="transparent")
         acct.pack(anchor="w", padx=30, pady=(18, 0))
@@ -2138,14 +2193,14 @@ class App(ctk.CTk):
         ic.pack(fill="both", expand=True, padx=20, pady=16)
         Label(ic, text="Create a room", font=(FONT, 15, "bold"), anchor="w").pack(fill="x")
         self.cap(ic, "Room name")
-        rr = ctk.CTkFrame(ic, fg_color="transparent")
-        rr.pack(fill="x")
-        self.h_room = TextLine(rr, "Room name")
-        self.h_room.pack(side="left", fill="x", expand=True)
-        self.btn(rr, "🎲", self.roll, CARD2, LINE, h=40, width=46).pack(side="left", padx=(8, 0))
+        self.h_room = TextLine(ic, "Room name")
+        self.h_room.pack(fill="x")
         self.cap(ic, "Room password")
-        self.h_pwd = self.entry(ic, "Password")
-        self.h_pwd.pack(fill="x")
+        pr = ctk.CTkFrame(ic, fg_color="transparent")
+        pr.pack(fill="x")
+        self.h_pwd = self.entry(pr, "Password")
+        self.h_pwd.pack(side="left", fill="x", expand=True)
+        self.btn(pr, "🎲", self.roll, CARD2, LINE, h=40, width=46).pack(side="left", padx=(8, 0))
         self.b_create = self.btn(ic, "Create room", self.create_room, h=44)
         self.b_create.pack(fill="x", pady=(16, 0))
 
@@ -2154,10 +2209,10 @@ class App(ctk.CTk):
         ij = ctk.CTkFrame(card_j, fg_color="transparent")
         ij.pack(fill="both", expand=True, padx=20, pady=16)
         Label(ij, text="Join a room", font=(FONT, 15, "bold"), anchor="w").pack(fill="x")
-        self.cap(ij, "Invite link from your friend")
+        self.cap(ij, "Invite code from your friend")
         gr = ctk.CTkFrame(ij, fg_color="transparent")
         gr.pack(fill="x")
-        self.g_link = self.entry(gr, "vlan42://join/...")
+        self.g_link = self.entry(gr, "xxxx.xxxx.xxxx...")
         self.g_link.pack(side="left", fill="x", expand=True)
         self.btn(gr, "Paste", self.paste_link, CARD2, LINE, h=40, width=70).pack(side="left", padx=(8, 0))
         self.b_join = self.btn(ij, "Join room", self.join_link, h=44)
@@ -2213,7 +2268,7 @@ class App(ctk.CTk):
         act = ctk.CTkFrame(left, fg_color="transparent")
         act.pack(fill="x")
         self.row_host = ctk.CTkFrame(act, fg_color="transparent")
-        self.b_inv = self.btn(self.row_host, "Copy invite link", self.show_invite, CARD2, LINE, h=36)
+        self.b_inv = self.btn(self.row_host, "Copy invite code", self.show_invite, CARD2, LINE, h=36)
         self.b_inv.pack(fill="x")
         self.row_mod = ctk.CTkFrame(act, fg_color="transparent")
         self.btn(self.row_mod, "Admin panel", self.show_admin, CARD2, LINE, h=36).pack(fill="x")
@@ -2254,7 +2309,7 @@ class App(ctk.CTk):
         self.logbox.configure(state="disabled")
         br = ctk.CTkFrame(self.pg_logs, fg_color="transparent")
         br.pack(fill="x", padx=16, pady=(0, 14))
-        for t, f in (("Copy log", self.copy_log), ("Save log", self.save_log),
+        for t, f in (("Copy log", self.copy_log),
                      ("Diagnostics", self.run_diag), ("Diag ZIP", self.export_zip)):
             self.btn(br, t, f, CARD2, LINE, h=32).pack(side="left", expand=True, fill="x", padx=3)
 
@@ -2318,10 +2373,25 @@ class App(ctk.CTk):
             if isinstance(k, tk.Toplevel):
                 mirror_tree(k, rtl)
 
+    def apply_font(self):
+        """The family the language just picked draws in: Vazir for Persian, the UI font
+        for English. Widgets built later read the same FONT, so they follow automatically."""
+        global FONT
+        if LANG[0] == "fa":
+            if self.fa_font is None:
+                self.fa_font = pick_fa_font(self)
+            want = self.fa_font or FONT_EN
+        else:
+            want = FONT_EN
+        if want != FONT:
+            FONT = want
+            refamily(self, want)
+
     def relayout(self):
-        """Answer the whole app in the language just picked: words first, then the mirror.
+        """Answer the whole app in the language just picked: pen first, then words, then the mirror.
         Rooms, panels and notices built afterwards are caught by the slow pass in tick()."""
         rtl = LANG[0] == "fa"
+        self.apply_font()
         try:
             retext_tree(self)
             self.mirror_all(rtl)
@@ -2342,6 +2412,7 @@ class App(ctk.CTk):
             pass
         try:
             if self.node:
+                self.role_key = None      # the rows carry words too, so build them anew
                 self.update_room_rows()
         except Exception:
             pass
@@ -2407,9 +2478,9 @@ class App(ctk.CTk):
         self.refresh_rooms()
         self.refresh_friends()
         if self.pending_enter:
-            code, pwd = self.pending_enter
+            tok = self.pending_enter
             self.pending_enter = None
-            self.join_by_invite({"from": "invite link", "room": "room", "code": code, "pwd": pwd})
+            self.join_by_invite({"from": "invite code", "room": "room", "token": tok})
 
     def on_auth_fail(self, ev):
         self.busy = False
@@ -2499,7 +2570,7 @@ class App(ctk.CTk):
         """One tracked placeholder widget - it must never stack up on redraw."""
         if show and self.rooms_empty is None:
             self.rooms_empty = Label(
-                self.rooms_list, text="No rooms yet - create one or join with an invite link.",
+                self.rooms_list, text="No rooms yet - create one or join with an invite code.",
                 font=(FONT, 13), text_color=MUTED)
             self.rooms_empty.pack(pady=30)
         elif not show and self.rooms_empty is not None:
@@ -2580,9 +2651,8 @@ class App(ctk.CTk):
         self.show_rooms_empty(not self.my_rooms)
 
     def roll(self):
-        """The dice beside the two fields a host would otherwise make guessable.
-        Everything comes from the OS entropy pool (secrets), never from random()."""
-        self.h_room.set(roll_name())
+        """The host names the room; only the password is thrown by the dice.
+        It comes from the OS entropy pool (secrets), never from random()."""
         self.h_pwd.delete(0, "end")
         self.h_pwd.insert(0, roll_password())
 
@@ -2615,12 +2685,12 @@ class App(ctk.CTk):
     def join_link(self):
         if not self.g_link.get().strip():
             self.paste_link()
-        inv = parse_invite(self.g_link.get())
-        if not inv:
-            self.q_put("This is not a valid invite link. Ask your friend to send it again.")
+        tok = parse_invite(self.g_link.get())
+        if not tok:
+            self.q_put("This is not a valid invite code. Ask your friend to send it again.")
             self.show_logs()
             return
-        self.join_by_invite({"from": "link", "room": "room", "code": inv[0], "pwd": inv[1]})
+        self.join_by_invite({"from": "invite code", "room": "room", "token": tok})
 
     def join_by_invite(self, inv):
         if not inv or self.busy or not self.link:
@@ -2628,10 +2698,9 @@ class App(ctk.CTk):
         self.busy = True
 
         def work():
-            r = self.link.req("join_room", code=inv["code"], pwd=inv["pwd"])
+            r = self.link.req("join_room", inv=inv.get("token") or "")
             self.busy = False
             if r.get("ok"):
-                self.invite_text = make_invite(inv["code"], inv["pwd"])
                 if r.get("pending"):
                     self.uq.put({"t": "join_pending", "name": r.get("room_name"),
                                  "msg": r.get("msg")})
@@ -2674,7 +2743,7 @@ class App(ctk.CTk):
         node = VpsNode(self.link, room, self.q_put, self.uq.put)
         node.chat_cb = lambda nm, tx, ts: self.cq.put((nm, tx, ts))
         self.room_name, self.role_key = room["name"], None
-        self.invite_text = make_invite(room.get("code", ""), room.get("pwd", ""))
+        self.invite_text = room.get("invite", "")   # sealed by the server, never built here
         node.update_state(room)
         self.chat_clear()
         self.node, self.busy, self.entering_rid = node, True, room.get("id")
@@ -2743,10 +2812,10 @@ class App(ctk.CTk):
         self.clipboard_append(txt)
 
     def show_invite(self):
-        """One button for both jobs: the link lands in the clipboard and a panel shows
-        the QR picture next to the session key, which can also be selected and copied."""
+        """One button for both jobs: the code lands in the clipboard and a panel shows
+        the QR picture next to it, where it can also be selected and copied."""
         if not self.invite_text:
-            self.q_put("There is no invite link yet - enter a room first.")
+            self.q_put("There is no invite code yet - enter a room first.")
             return
         self.copy_text(self.invite_text)
         self.flash(self.b_inv, "Copied ✓")
@@ -2756,8 +2825,8 @@ class App(ctk.CTk):
             return
         top = self.iwin = ctk.CTkToplevel(self)
         top.configure(fg_color=CARD)
-        self.brand(top, "Invite link")
-        self.panel_head(top, "Invite link")
+        self.brand(top, "Invite code")
+        self.panel_head(top, "Invite code")
         photo = None
         try:
             import qrcode
@@ -2775,7 +2844,7 @@ class App(ctk.CTk):
         else:
             Label(top, text="The QR picture needs:  pip install qrcode[pil]",
                          font=(FONT, 12), text_color=YELLOW).pack(pady=(16, 4))
-        Label(top, text="Session key (already copied to your clipboard):",
+        Label(top, text="Invite code (already copied to your clipboard):",
                      font=(FONT, 12), text_color=MUTED).pack(pady=(6, 2))
         key = TextLine(top, "", height=44)
         key.pack(fill="x", padx=20, pady=(0, 4))
@@ -2786,7 +2855,7 @@ class App(ctk.CTk):
         def cp(b):
             self.copy_text(self.invite_text)
             self.flash(b, "Copied ✓")
-        b_cp = self.btn(row, "Copy key", lambda: cp(b_cp), h=36)
+        b_cp = self.btn(row, "Copy code", lambda: cp(b_cp), h=36)
         b_cp.pack(side="left", expand=True, fill="x", padx=(0, 6))
         self.btn(row, "Close", top.destroy, CARD2, LINE, h=36).pack(side="left", expand=True, fill="x")
 
@@ -3029,7 +3098,7 @@ class App(ctk.CTk):
         self.fr_search.pack(side="left", fill="x", expand=True)
         self.fr_search.bind("<Return>", lambda e: self.do_search())
         self.btn(sr, "Search", self.do_search, CARD2, LINE, h=40, width=76).pack(side="left", padx=(8, 0))
-        self.fr_results = ctk.CTkFrame(li, fg_color="transparent")
+        self.fr_results = ctk.CTkFrame(li, fg_color="transparent", width=0, height=0)
         self.fr_results.pack(fill="x", pady=(4, 0))
         self.fr_body = ctk.CTkScrollableFrame(li, fg_color="transparent")
         self.fr_body.pack(fill="both", expand=True, pady=(4, 0))
@@ -3351,11 +3420,6 @@ class App(ctk.CTk):
         self.clipboard_append(self.logbox.get("1.0", "end"))
         self.q.put("Log copied to clipboard")
 
-    def save_log(self):
-        p = os.path.join(APP_DIR, "vlan42_log.txt")
-        open(p, "w", encoding="utf-8").write(self.logbox.get("1.0", "end"))
-        self.q.put(f"Log saved: {p}")
-
     def run_diag(self):
         self.q.put(self.node.diag() if self.node else "Not connected")
 
@@ -3391,20 +3455,6 @@ class App(ctk.CTk):
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ periodic UI update
-    def write_log_file(self, text):
-        if self.logf is None:
-            try:
-                p = os.path.join(APP_DIR, "vlan42.log")
-                mode = "w" if os.path.exists(p) and os.path.getsize(p) > 1_000_000 else "a"
-                self.logf = open(p, mode, encoding="utf-8", buffering=1)
-            except OSError:
-                self.logf = False
-        if self.logf:
-            try:
-                self.logf.write(text)
-            except OSError:
-                pass
-
     def refresh(self):
         if self.closing:
             return
@@ -3459,7 +3509,6 @@ class App(ctk.CTk):
                 self.logbox.delete("1.0", f"{n - 1200}.0")
             self.logbox.see("end")
             self.logbox.configure(state="disabled")
-            self.write_log_file(text)
         while not self.cq.empty():
             nm, tx, ts = self.cq.get()
             self.chat_add(nm, tx, "them", ts)
@@ -3667,28 +3716,31 @@ class App(ctk.CTk):
             pid = m["id"]
             mine = pid == mine_id
             role = m.get("role", "member")
-            r = ctk.CTkFrame(self.plist, fg_color=(LINE if mine else CARD2), corner_radius=10)
+            # one line per player, inside a card of its own: dot, name, ip, ping, buttons
+            r = ctk.CTkFrame(self.plist, fg_color=(LINE if mine else CARD2), corner_radius=10,
+                             border_width=1, border_color=(ACC if mine else LINE),
+                             width=0, height=0)
             r.pack(fill="x", pady=3, padx=4)
-            r.grid_columnconfigure(1, weight=1)
-            # one dot says the whole status story: green means talking, grey means away
-            dot = Label(r, text="●", font=(FONT, 13),
-                               text_color=(GREEN if m.get("online") else GRAY))
-            dot.grid(row=0, column=0, rowspan=2, padx=(12, 7), pady=8)
-            who = ctk.CTkFrame(r, fg_color="transparent")
-            who.grid(row=0, column=1, sticky="w", pady=(7, 0))
-            name = Label(who, text=m.get("name", "?") + ("   (you)" if mine else ""),
-                                font=(FONT, 13), anchor="w")
+            # width=0 keeps an empty holder from claiming the 200x200 customtkinter default
+            btns = ctk.CTkFrame(r, fg_color="transparent", width=0, height=0)
+            btns.pack(side="right", padx=(6, 10))
+            ping = Label(r, text="...", font=(FONT, 12), width=62, anchor="e")
+            ping.pack(side="right", padx=(4, 2))
+            info = Label(r, text=m.get("vip", ""), font=(FONT, 12), text_color=MUTED,
+                                anchor="e", width=92)
+            info.pack(side="right", padx=(10, 4))
+            dot = Label(r, text="●", font=(FONT, 14),
+                              text_color=(GREEN if m.get("online") else GRAY))
+            dot.pack(side="left", padx=(12, 7))
+            who = ctk.CTkFrame(r, fg_color="transparent", width=0, height=0)
+            who.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            name = Label(who, font=(FONT, 13), anchor="w",
+                               text=fmt("{who}   (you)", who=m.get("name", "?")) if mine
+                               else m.get("name", "?"))
             name.pack(side="left")
             rank = Label(who, text=rank_mark(role), font=(FONT, 11),
                                text_color=(GOLD if role == "owner" else BLUE if role == "admin" else MUTED))
             rank.pack(side="left", padx=(6, 0))
-            # the virtual IP only - clicking the line copies it
-            info = Label(r, text=m.get("vip", ""), font=(FONT, 11), text_color=MUTED, anchor="w")
-            info.grid(row=1, column=1, sticky="w", pady=(0, 7))
-            ping = Label(r, text="...", font=(FONT, 12, "bold"))
-            ping.grid(row=0, column=2, rowspan=2, padx=(8, 6))
-            btns = ctk.CTkFrame(r, fg_color="transparent")
-            btns.grid(row=0, column=3, rowspan=2, padx=(0, 12))
             if not mine:
                 if self.my_role() == "owner" or perms.get("kick"):
                     kb = Btn(btns, text="Kick", width=54, height=26, font=(FONT, 11),
@@ -3700,17 +3752,26 @@ class App(ctk.CTk):
                                        corner_radius=8, fg_color=CARD, hover_color=LINE, text_color=RED,
                                        command=lambda q=pid: self.ban_user(q))
                     bb.pack(side="left", padx=2)
-                for w in (r, dot, who, name, rank, info, ping):
-                    w.configure(cursor="hand2")
-                    w.bind("<Button-1>", lambda e, q=pid: self.copy_peer_ip(q))
+            for w in (r, dot, who, name, rank, info, ping):
+                w.configure(cursor="hand2")
+                w.bind("<Button-1>", lambda e, q=pid: self.copy_peer_ip(q))
             self.rows[pid] = (r, name, info, ping, dot)
 
+    def peer_vip(self, n, pid):
+        """The virtual IP a player holds in this room - the roster is the authority."""
+        m = next((x for x in n.room.get("members", []) if x["id"] == pid), None)
+        return (m or {}).get("vip") or (n.peers.get(pid) or {}).get("vip") or ""
+
     def copy_peer_ip(self, pid):
-        p = self.node.peers.get(pid) if self.node else None
-        if p and p.get("vip"):
+        """Any player line, mine included, hands over the virtual IP it shows."""
+        n = self.node
+        if not n:
+            return
+        vip = self.peer_vip(n, pid)
+        if vip:
             self.clipboard_clear()
-            self.clipboard_append(p["vip"])
-            self.q_put(fmt("{vip} copied - paste it into the game", vip=p["vip"]))
+            self.clipboard_append(vip)
+            self.q_put(fmt("{vip} copied - paste it into the game", vip=vip))
 
     def update_room(self, n):
         setw(self.lbl_you, text=fmt("{who}   ·   {vip}   ·   role: {r}",
@@ -3720,14 +3781,11 @@ class App(ctk.CTk):
         mine_id = self.link.user["id"] if (self.link and self.link.user) else None
         online = 0
         for pid, row in self.rows.items():
-            p = n.peers.get(pid)
-            if not p:
-                continue
             r, name, info, ping, dot = row
-            live = bool(p.get("online")) and not p.get("timed_out")
-            setw(dot, text_color=GREEN if live else GRAY)
             if pid == mine_id:
                 # my own line: the round trip to the VPS is the number that matters
+                setw(dot, text_color=GREEN)
+                setw(info, text=self.peer_vip(n, pid) or n.vip or "")
                 if n.srv_rtt:
                     setw(ping, text=f"{n.srv_rtt:.0f} ms",
                          text_color=GREEN if n.srv_rtt < 60 else YELLOW if n.srv_rtt < 120 else RED)
@@ -3735,14 +3793,20 @@ class App(ctk.CTk):
                     setw(ping, text="...", text_color=YELLOW)
                 online += 1
                 continue
+            p = n.peers.get(pid)
+            if not p:
+                continue
+            vip = self.peer_vip(n, pid)
+            live = bool(p.get("online")) and not p.get("timed_out")
+            setw(dot, text_color=GREEN if live else GRAY)
             setw(name, text=p.get("name", "?"))
             if p.get("timed_out"):
                 setw(ping, text="timeout", text_color=RED)
-                setw(info, text=fmt("{vip}  ·  no answer since {t}", vip=p.get("vip", ""),
+                setw(info, text=fmt("{vip}  ·  no answer since {t}", vip=vip,
                                     t=time.strftime("%H:%M:%S", time.localtime(p.get("last", 0)))))
             elif not p.get("online"):
                 setw(ping, text="offline", text_color=GRAY)
-                setw(info, text=p.get("vip", ""))
+                setw(info, text=vip)
             else:
                 rtt = p.get("rtt")
                 if rtt is None:
@@ -3750,14 +3814,14 @@ class App(ctk.CTk):
                 else:
                     setw(ping, text=f"{rtt:.0f} ms",
                          text_color=GREEN if rtt < 60 else YELLOW if rtt < 120 else RED)
-                setw(info, text=p.get("vip", ""))
+                setw(info, text=vip)
                 online += 1
-        peers_online = sum(1 for p in n.peers.values() if p.get("online"))
-        if peers_online:
-            setw(self.lbl_status, text="● Online", text_color=GREEN)
+        if self.link and self.link.alive:
+            # one person standing inside is still a room attached to the server
+            setw(self.lbl_status, text="● Connected", text_color=GREEN)
         else:
             setw(self.lbl_status, text="● Waiting", text_color=YELLOW)
-        setw(self.lbl_count, text=f"{peers_online} online")
+        setw(self.lbl_count, text=fmt("{n} online", n=online))
         now = time.time()
         t0, tx0, rx0 = self.stat
         if now - t0 >= 1:
@@ -3769,7 +3833,7 @@ class App(ctk.CTk):
                 self.empty.pack_forget()
                 self.empty_on = False
         else:
-            setw(self.empty, text="Waiting for your friends...\nSend them the invite link.")
+            setw(self.empty, text="Waiting for your friends...\nSend them the invite code.")
             if not self.empty_on:
                 self.empty.pack(pady=50)
                 self.empty_on = True
@@ -3808,10 +3872,12 @@ class App(ctk.CTk):
     def _finish_close(self):
         try:
             faulthandler.cancel_dump_traceback_later()
-            if self.logf:
-                self.logf.close()
             if self.hangf:
                 self.hangf.close()
+            try:
+                os.remove(HANG_FILE)        # a clean exit leaves no file behind
+            except OSError:
+                pass
         except Exception:
             pass
         self.destroy()

@@ -6,7 +6,7 @@
 Boots a throw-away server on port 45242 in this folder (fresh database),
 runs the checks, then stops it. Nothing here touches the real vlan42_data.
 """
-import base64, json, os, shutil, socket, struct, subprocess, sys, threading, time, queue
+import base64, json, os, re, shutil, socket, struct, subprocess, sys, threading, time, queue
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -225,7 +225,10 @@ def main():
     check("owner role", room["my_role"] == "owner")
     check("owner vip 10.77.0.1", room["members"][0]["vip"] == "10.77.0.1")
     code, pwd, rid, key = room["code"], room["pwd"], room["id"], room["key"]
-    check("invite link", r["invite"].startswith("vlan42://join/"))
+    check("the invite is a sealed code, not a link",
+          "://" not in r["invite"] and r["invite"].count(".") >= 5
+          and re.fullmatch(r"[A-Za-z0-9_-]{4}(\.[A-Za-z0-9_-]{1,4})+", r["invite"]) is not None,
+          r["invite"])
 
     # wrong room password
     r = b.req("join_room", code=code, pwd="nope")
@@ -387,7 +390,8 @@ def main():
     r = a.req("invite", user="bob", room=rid)
     check("invite friend to room", r.get("ok"))
     inv = b.drain_push("invite")
-    check("bob receives invite push", inv is not None and inv.get("code") == code)
+    check("bob receives invite push", inv is not None and inv.get("code") == code
+          and bool(inv.get("token")))
 
     # dormancy: a room with one member online must not relay anything
     check("bob deactivates", b.req("deactivate").get("ok"))
@@ -421,3 +425,8 @@ if __name__ == "__main__":
         srv.terminate()
         srv.wait(timeout=5)
         shutil.rmtree(os.path.join(HERE, "vlan42_data"), ignore_errors=True)
+        for junk in ("vlan42_server.py", "vlan42_server.json"):
+            try:
+                os.remove(os.path.join(HERE, junk))
+            except OSError:
+                pass
