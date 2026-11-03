@@ -442,6 +442,14 @@ class VpsLink:
         with self.send_lock:
             self.sock.sendall(base64.b64encode(n + self.aead.encrypt(n, raw, b"vlan42-ctl")) + b"\n")
 
+    def notify_server(self, t, **kw):
+        """Fire and forget - used for the typing dots, where an answer is not worth a wait."""
+        if self.alive:
+            try:
+                self.send({"t": t, **kw})
+            except OSError:
+                pass
+
     def req(self, t, timeout=15, **kw):
         """Send a request and wait for the reply with the same type."""
         if not self.alive:
@@ -827,9 +835,8 @@ class VpsNode:
             interval = 10.0 if alone else 2.0   # dormant room: far fewer keepalives
             if now - last_ping >= interval:
                 last_ping = now
-                if alone:
-                    self._ping_t = time.time()
-                    self.usend(b"V42PING")
+                self._ping_t = time.time()      # my own latency, shown in the players list
+                self.usend(b"V42PING")
                 for uid, p in list(self.peers.items()):
                     if not p.get("online"):
                         continue
@@ -940,15 +947,30 @@ def already_running():
 
 # --------------------------------------------------------------------- UI
 BG, CARD, CARD2, LINE = "#0e1218", "#161c25", "#1d2531", "#2a3442"
-ACC, ACC_H, BLUE = "#2ecc71", "#27ae60", "#3498db"
+# a warm grass green: the dark ink on it keeps Persian button labels readable
+ACC, ACC_H, ACC_TXT = "#8bc34a", "#76ad3c", "#12200f"
+BLUE = "#3498db"
 TXT, MUTED = "#e8edf3", "#8896a8"
-GREEN, YELLOW, RED, GRAY = "#2ecc71", "#f1c40f", "#e74c3c", "#6b7686"
+GREEN, YELLOW, RED, GRAY = "#4ecb6a", "#f1c40f", "#e74c3c", "#6b7686"
+NAME_RED = "#ff4d4d"          # the signed-in name
+NAME_DIM = "#6e2323"          # the dark half of its pulse
 GOLD = "#f5c542"
 FONT = "Segoe UI"
 
 
 def has_rtl(text):
     return any("\u0590" <= c <= "\u08ff" or "\ufb1d" <= c <= "\ufdff" or "\ufe70" <= c <= "\ufeff" for c in text)
+
+
+# two short word lists are only there to make the room name pleasant to read;
+# the secret of a room is its password, and that is 192 bits of OS randomness
+NAME_WORDS = ("amber", "falcon", "vertex", "cobalt", "ember", "harbor", "quartz", "raven",
+              "tundra", "willow", "zenith", "onyx", "comet", "delta", "echo", "granite",
+              "orbit", "pixel", "ridge", "saffron", "tidal", "ultra", "vortex", "walnut")
+
+
+def roll_password():
+    return secrets.token_urlsafe(24)      # 32 characters, no guessable pattern
 
 
 _CLIP_KEYS = {65: "sel", 67: "<<Copy>>", 86: "<<Paste>>", 88: "<<Cut>>"}
@@ -1047,19 +1069,26 @@ def make_icon(path):
 class TextLine(ctk.CTkTextbox):
     """Single-line input on a Text widget: Persian (RTL) text types correctly."""
 
-    def __init__(self, master, placeholder="", on_enter=None, height=40, **kw):
+    def __init__(self, master, placeholder="", on_enter=None, height=40, on_type=None, **kw):
         super().__init__(master, height=height, wrap="none", activate_scrollbars=False, fg_color=CARD2,
                          border_width=1, border_color=LINE, corner_radius=8, font=(FONT, 14),
                          text_color=TXT, **kw)
         self.ph, self.on_enter, self.ph_on = placeholder, on_enter, False
+        self.on_type = on_type
+        self.rtl_on = False
         self.tag_config("rtl", justify="right")
         self.tag_config("ph", foreground=GRAY)
         self.bind("<FocusIn>", lambda e: self.clear_ph())
         self.bind("<FocusOut>", lambda e: self.show_ph())
         self.bind("<Return>", self.enter)
-        self.bind("<KeyRelease>", lambda e: self.align())
+        self.bind("<KeyRelease>", self.on_key)
         fix_clipboard(self)
         self.show_ph()
+
+    def on_key(self, e=None):
+        self.align()
+        if self.on_type and not self.ph_on:
+            self.on_type()
 
     def show_ph(self):
         if self.ph and not self.get("1.0", "end-1c"):
@@ -1077,11 +1106,22 @@ class TextLine(ctk.CTkTextbox):
         return "break"
 
     def align(self):
+        """Flip the line to right-to-left the moment Persian letters appear.
+        Only touch the tags when the direction really changes - re-tagging every
+        keystroke is what made the caret jump around behind the text."""
         if self.ph_on:
             return
+        rtl = has_rtl(self.get("1.0", "end-1c"))
+        if rtl == self.rtl_on:
+            return
+        self.rtl_on = rtl
+        caret = self.index("insert")
         self.tag_remove("rtl", "1.0", "end")
-        if has_rtl(self.get("1.0", "end-1c")):
+        if rtl:
             self.tag_add("rtl", "1.0", "end")
+        self.mark_set("insert", caret)
+        self.update_idletasks()        # redraw now, so the caret is on the right on the first letter
+        self.icursor(caret)
 
     def value(self):
         return "" if self.ph_on else self.get("1.0", "end-1c").replace("\n", " ").strip()
@@ -1096,6 +1136,13 @@ class TextLine(ctk.CTkTextbox):
 
 
 ROLE_BADGE = {"owner": ("👑 Owner", GOLD), "admin": ("🛡 Admin", BLUE), "member": ("Member", MUTED)}
+# the word that trails a name wherever the roster or a chat line shows it
+RANK_MARK = {"owner": "(owner)", "admin": "(admin)"}
+
+
+def with_rank(name, role):
+    mark = RANK_MARK.get(role or "member")
+    return f"{name}  {mark}" if mark else name
 
 
 class App(ctk.CTk):
@@ -1156,7 +1203,10 @@ class App(ctk.CTk):
         self.pending_enter = None       # room dict waiting for login
         self.role_key = None
         self.invite = None              # {"from","room","code","pwd"}
-        self.awin = self.bwin = None
+        self.awin = self.iwin = None
+        self.admin_tab = "Members"      # which half of the admin panel is showing
+        self.jwin = None                # join-request panel
+        self.notes = []                 # live in-app notification cards
         self.rooms_t = 0.0
         self.entering_rid = None
         self.tab = None                  # the tab the player opened
@@ -1164,6 +1214,8 @@ class App(ctk.CTk):
         self.pages = {}
         self.pms, self.pm_unread = {}, {}    # friend name -> thread / unread count
         self.sel_friend = None
+        self.type_t = {}                     # thread -> when we last said "typing"
+        self.typing_room, self.typing_pm = {}, {}   # name -> when the dots expire
         cfg = load_cfg()
         self.body = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         self.build_nav()
@@ -1199,6 +1251,8 @@ class App(ctk.CTk):
         return e
 
     def btn(self, parent, text, cmd, color=ACC, hover=ACC_H, h=40, **kw):
+        if "text_color" not in kw:
+            kw["text_color"] = ACC_TXT if color == ACC else TXT
         return ctk.CTkButton(parent, text=text, command=cmd, height=h, fg_color=color, hover_color=hover,
                              font=(FONT, 13, "bold"), corner_radius=10, **kw)
 
@@ -1262,7 +1316,7 @@ class App(ctk.CTk):
                               text_color=MUTED, border_width=1, border_color=CARD,
                               command=lambda k=key: self.select_tab(k))
             b.pack(side="left")
-            badge = ctk.CTkLabel(holder, text="", font=(FONT, 11, "bold"), text_color="#0b1f12",
+            badge = ctk.CTkLabel(holder, text="", font=(FONT, 11, "bold"), text_color=ACC_TXT,
                                  fg_color=ACC, corner_radius=9, width=22, height=20)
             badge.pack(side="left", padx=(0, 2))
             self.tabs[key] = (holder, b, badge)
@@ -1271,6 +1325,9 @@ class App(ctk.CTk):
         self.btn(row, "Logout", self.logout, CARD2, LINE, h=30, width=80).pack(side="right")
         self.lbl_nav_acct = ctk.CTkLabel(row, text="", font=(FONT, 12), text_color=MUTED)
         self.lbl_nav_acct.pack(side="right", padx=(0, 14))
+        credit = ctk.CTkLabel(row, text="DEVELOPED BY : Hossein42\nUI / UX DESIGN : Erfan.Sh",
+                              font=(FONT, 10), text_color=MUTED, justify="right")
+        credit.pack(side="right", padx=(0, 18))
 
     def select_tab(self, key):
         if key == "room" and not self.node:
@@ -1302,6 +1359,96 @@ class App(ctk.CTk):
         else:
             setw(badge, text="")
             badge.pack_forget()
+
+    def blink_tick(self):
+        """Pulse the signed-in name; it stops on its own once the link is gone."""
+        if not (self.link and self.link.alive):
+            return
+        self.blink_on = not self.blink_on
+        try:
+            if self.lbl_acct_name.winfo_exists():
+                self.lbl_acct_name.configure(
+                    text_color=(NAME_RED if self.blink_on else NAME_DIM))
+        except Exception:
+            return
+        self.after(700, self.blink_tick)
+
+    # ------------------------------------------------------------ in-app notifications
+    def notify(self, title, text, actions=None, keep=14):
+        """A card inside the window - no new form to chase, and the buttons work from
+        wherever you are. actions is a list of (label, command(card), color)."""
+        if not self.winfo_exists():
+            return
+        card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12,
+                            border_width=1, border_color=ACC)
+        ctk.CTkLabel(card, text=title, font=(FONT, 13, "bold"), text_color=ACC,
+                     anchor="w").pack(fill="x", padx=14, pady=(10, 0))
+        ctk.CTkLabel(card, text=text, font=(FONT, 12), text_color=TXT, anchor="w",
+                     wraplength=270, justify="left").pack(fill="x", padx=14, pady=(2, 6))
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(0, 10))
+        for label, cmd, color in (actions or []):
+            self.btn(row, label, lambda c=card, fn=cmd: fn(c), color, CARD2,
+                     h=30, width=78).pack(side="right", padx=3)
+        self.notes.insert(0, [card, keep])
+        self.layout_notes()
+        return card
+
+    def layout_notes(self):
+        """Stack the live cards in the bottom corner of the window."""
+        y = 12
+        for entry in self.notes:
+            card = entry[0]
+            if not card.winfo_exists():
+                continue
+            card.place(relx=1.0, rely=1.0, anchor="se", x=-12, y=-y)
+            self.update_idletasks()
+            y += card.winfo_reqheight() + 8
+
+    def tick_notes(self):
+        for entry in list(self.notes):
+            entry[1] -= 1
+            if entry[1] <= 0:
+                self.drop_note(entry[0])
+        self.layout_notes()
+        if self.notes:
+            self.after(1000, self.tick_notes)
+
+    def drop_note(self, card):
+        for entry in list(self.notes):
+            if entry[0] is card:
+                self.notes.remove(entry)
+        try:
+            card.destroy()
+        except Exception:
+            pass
+        self.layout_notes()
+
+    def note_friend_req(self, name):
+        """A friend request is an accept/decline card, not a page you must find."""
+        self.notify("Friend request", f"{name} wants to be your friend.", [
+            ("✕", lambda c: self.answer_req(name, False, c), CARD2),
+            ("Accept", lambda c: self.answer_req(name, True, c), ACC)])
+        self.start_notes()
+
+    def answer_req(self, name, accept, card):
+        self.friend_req(name, "friend_resp", accept=accept)
+        self.drop_note(card)
+
+    def start_notes(self):
+        if len(self.notes) == 1:
+            self.after(1000, self.tick_notes)
+
+    def note_pm(self, name, text):
+        if self.page == "friends":
+            return
+        self.notify("Message", f"{name}: {text[:70]}",
+                    [("Open", lambda c: self.open_pm_from_note(name), ACC)])
+        self.start_notes()
+
+    def open_pm_from_note(self, name):
+        self.select_tab("friends")
+        self.open_pm(name)
     def show_main(self):
         style_window(self)
         self.fade_in()
@@ -1428,13 +1575,26 @@ class App(ctk.CTk):
         ctk.CTkLabel(title, text="42", font=(FONT, 32, "bold"), text_color=ACC).pack(side="left", padx=(8, 0))
         ctk.CTkLabel(side, text="Play together over a\nvirtual local network.", font=(FONT, 13),
                      text_color=MUTED, justify="left").pack(anchor="w", padx=30, pady=(8, 22))
+        # "signed in as <name>" - the name is bright red and pulses so you see it is live
+        acct = ctk.CTkFrame(side, fg_color="transparent")
+        acct.pack(anchor="w", padx=30, pady=(18, 0))
+        ctk.CTkLabel(acct, text="signed in as", font=(FONT, 12), text_color=MUTED).pack(side="left")
+        self.lbl_acct_name = ctk.CTkLabel(acct, text="", font=(FONT, 13, "bold"), text_color=NAME_RED)
+        self.lbl_acct_name.pack(side="left", padx=(7, 0))
         self.lbl_acct = ctk.CTkLabel(side, text="", font=(FONT, 12), text_color=MUTED, anchor="w",
                                      justify="left")
-        self.lbl_acct.pack(anchor="w", padx=30, pady=(18, 0))
-        cr = ctk.CTkLabel(side, text="coded by Hossein & Erfan\ngithub.com/mhbanaei", font=(FONT, 11),
-                          text_color=MUTED, justify="left", cursor="hand2")
-        cr.pack(side="bottom", anchor="w", padx=30, pady=(0, 22))
-        cr.bind("<Button-1>", lambda e: webbrowser.open(GITHUB_URL))
+        self.lbl_acct.pack(anchor="w", padx=30, pady=(2, 0))
+        self.blink_on = True
+
+        # the friends menu lives here so you can see who is online without opening a window
+        fhead = ctk.CTkFrame(side, fg_color="transparent")
+        fhead.pack(fill="x", anchor="w", padx=30, pady=(20, 2))
+        ctk.CTkLabel(fhead, text="Friends", font=(FONT, 13, "bold"), anchor="w").pack(side="left")
+        self.lbl_fr_online = ctk.CTkLabel(fhead, text="", font=(FONT, 11), text_color=GREEN, anchor="e")
+        self.lbl_fr_online.pack(side="right")
+        self.fr_rail = ctk.CTkScrollableFrame(side, fg_color="transparent", height=170)
+        self.fr_rail.pack(fill="both", expand=True, padx=22, pady=(0, 8))
+        self.rail_rows = {}
 
         main = ctk.CTkFrame(self.pg_start, fg_color=BG, corner_radius=0)
         main.pack(side="left", fill="both", expand=True)
@@ -1531,18 +1691,14 @@ class App(ctk.CTk):
         act = ctk.CTkFrame(left, fg_color="transparent")
         act.pack(fill="x")
         self.row_host = ctk.CTkFrame(act, fg_color="transparent")
-        self.b_inv = self.btn(self.row_host, "Copy invite", self.copy_invite, CARD2, LINE, h=36)
-        self.b_inv.pack(side="left", expand=True, fill="x", padx=(0, 4))
-        self.btn(self.row_host, "QR", self.show_qr, CARD2, LINE, h=36, width=56).pack(side="left")
+        self.b_inv = self.btn(self.row_host, "Copy invite link", self.show_invite, CARD2, LINE, h=36)
+        self.b_inv.pack(fill="x")
         self.row_mod = ctk.CTkFrame(act, fg_color="transparent")
-        self.btn(self.row_mod, "Admin panel", self.show_admin, CARD2, LINE, h=36).pack(
-            side="left", expand=True, fill="x", padx=(0, 4))
-        self.btn(self.row_mod, "Bans", self.show_bans, CARD2, LINE, h=36).pack(side="left")
+        self.btn(self.row_mod, "Admin panel", self.show_admin, CARD2, LINE, h=36).pack(fill="x")
         self.row_common = ctk.CTkFrame(act, fg_color="transparent")
         self.row_common.pack(fill="x", pady=(0, 6))
-        self.b_ip = self.btn(self.row_common, "Copy my IP", self.copy_ip, CARD2, LINE, h=36)
-        self.b_ip.pack(side="left", expand=True, fill="x", padx=(0, 4))
-        self.btn(self.row_common, "Logs", self.show_logs, CARD2, LINE, h=36, width=70).pack(side="left")
+        self.btn(self.row_common, "Logs", self.show_logs, CARD2, LINE, h=36).pack(
+            side="left", expand=True, fill="x", padx=(0, 4))
         self.btn(act, "Leave room", self.leave, "#c0392b", "#a93226", h=40).pack(fill="x")
 
         right = ctk.CTkFrame(self.pg_room, fg_color=CARD, corner_radius=14, border_width=1, border_color=LINE)
@@ -1556,9 +1712,13 @@ class App(ctk.CTk):
                         ("rtl", {"justify": "right"}), ("ltr", {"justify": "left"})):
             self.chatbox.tag_config(tag, **kw)
         self.chatbox.configure(state="disabled")
+        self.lbl_typing = ctk.CTkLabel(right, text="", font=(FONT, 11, "italic"),
+                                       text_color=MUTED, anchor="w")
+        self.lbl_typing.pack(fill="x", padx=16, pady=(0, 2))
         crow = ctk.CTkFrame(right, fg_color="transparent")
         crow.pack(fill="x", padx=14, pady=12)
-        self.chat_in = TextLine(crow, "Type a message...", on_enter=self.send_chat)
+        self.chat_in = TextLine(crow, "Type a message...", on_enter=self.send_chat,
+                                on_type=lambda: self.note_typing())
         self.chat_in.pack(side="left", fill="x", expand=True)
         self.btn(crow, "Send", self.send_chat, h=40, width=80).pack(side="left", padx=(8, 0))
 
@@ -1592,7 +1752,7 @@ class App(ctk.CTk):
             role = (self.node.room.get("my_role") if self.node else None) or "member"
             badge, color = ROLE_BADGE.get(role, ROLE_BADGE["member"])
             setw(self.lbl_role, text=badge, fg_color=(ACC if role == "owner" else BLUE if role == "admin" else CARD2),
-                 text_color=(TXT if role == "member" else "#0b1f12" if role == "owner" else "white"))
+                 text_color=(TXT if role == "member" else ACC_TXT if role == "owner" else "white"))
             self.lbl_room.configure(text=self.room_name)
             self.row_host.pack_forget()
             self.row_mod.pack_forget()
@@ -1620,7 +1780,10 @@ class App(ctk.CTk):
         self.b_auth.configure(text="Sign in", state="normal")
         self.lbl_login_err.configure(text="")
         setw(self.lbl_nav_acct, text=self.my_name)
-        setw(self.lbl_acct, text=f"signed in as {self.my_name}\n{APP_NAME} network online")
+        setw(self.lbl_acct_name, text=self.my_name)
+        setw(self.lbl_acct, text=f"{APP_NAME} network online")
+        self.blink_on = True
+        self.blink_tick()
         self.tab = "start"
         self.show_page("start")
         self.q_put(f"Logged in as {self.my_name} (server {ev['server']})")
@@ -1654,13 +1817,20 @@ class App(ctk.CTk):
         self.pms, self.pm_unread, self.sel_friend = {}, {}, None
         self.friends = {"friends": [], "requests": []}
         self.rebuild_friends()
-        for w in (self.awin, self.bwin):
+        for entry in list(self.notes):
+            try:
+                entry[0].destroy()
+            except Exception:
+                pass
+        self.notes = []
+        for w in (self.awin, self.iwin, self.jwin):
             if w:
                 try:
                     w.destroy()
                 except Exception:
                     pass
-        self.awin = self.bwin = None
+        self.awin = self.iwin = self.jwin = None
+        self.admin_tab = "Members"
         self.show_page("login")
 
     # ------------------------------------------------------------ rooms (landing)
@@ -1778,9 +1948,12 @@ class App(ctk.CTk):
         self.show_rooms_empty(not self.my_rooms)
 
     def roll(self):
-        self.h_room.set("room-" + secrets.token_hex(3))
+        """The dice beside the two fields a host would otherwise make guessable.
+        Everything comes from the OS entropy pool (secrets), never from random()."""
+        self.h_room.set(f"{secrets.choice(NAME_WORDS)}-{secrets.choice(NAME_WORDS)}-"
+                        f"{secrets.randbelow(900) + 100}")
         self.h_pwd.delete(0, "end")
-        self.h_pwd.insert(0, secrets.token_urlsafe(8))
+        self.h_pwd.insert(0, roll_password())
 
     def paste_link(self):
         try:
@@ -1928,39 +2101,57 @@ class App(ctk.CTk):
                 self.q.put(f"ERROR: {ex}")
         threading.Thread(target=work, daemon=True).start()
 
-    def copy_invite(self):
+    def copy_text(self, txt):
         self.clipboard_clear()
-        self.clipboard_append(self.invite_text)
+        self.clipboard_append(txt)
+
+    def show_invite(self):
+        """One button for both jobs: the link lands in the clipboard and a panel shows
+        the QR picture next to the session key, which can also be selected and copied."""
+        if not self.invite_text:
+            self.q_put("There is no invite link yet - enter a room first.")
+            return
+        self.copy_text(self.invite_text)
         self.flash(self.b_inv, "Copied ✓")
-
-    def copy_ip(self):
-        if self.node:
-            self.clipboard_clear()
-            self.clipboard_append(self.node.vip)
-            self.flash(self.b_ip, "Copied ✓")
-
-    def show_qr(self):
+        if self.iwin and self.iwin.winfo_exists():
+            self.iwin.deiconify()
+            self.iwin.lift()
+            return
+        top = self.iwin = ctk.CTkToplevel(self)
+        top.configure(fg_color=CARD)
+        self.brand(top, "Invite link")
+        self.panel_head(top, "Invite link")
+        photo = None
         try:
             import qrcode
+            qr = qrcode.QRCode(box_size=8, border=2)
+            qr.add_data(self.invite_text)
+            qr.make(fit=True)
+            im = qr.make_image(fill_color="black", back_color="white").get_image().convert("RGB")
+            photo = ctk.CTkImage(light_image=im, dark_image=im, size=im.size)
         except ImportError:
-            self.q_put("QR needs:  pip install qrcode[pil]")
-            self.show_logs()
-            return
-        qr = qrcode.QRCode(box_size=8, border=2)
-        qr.add_data(self.invite_text)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white").get_image().convert("RGB")
-        top = ctk.CTkToplevel(self)
-        top.configure(fg_color=CARD)
-        self.brand(top, "Invite QR")
-        self.panel_head(top, "Invite QR")
-        photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        lbl = ctk.CTkLabel(top, image=photo, text="")
-        lbl.image = photo
-        lbl.pack(padx=24, pady=(24, 8))
-        ctk.CTkLabel(top, text="Scan with your phone to copy the invite text,\nthen send it to your friend.",
-                     text_color=MUTED).pack()
-        self.btn(top, "Copy invite", self.copy_invite, h=36).pack(pady=14)
+            pass
+        if photo:
+            lbl = ctk.CTkLabel(top, image=photo, text="")
+            lbl.image = photo
+            lbl.pack(padx=24, pady=(18, 6))
+        else:
+            ctk.CTkLabel(top, text="The QR picture needs:  pip install qrcode[pil]",
+                         font=(FONT, 12), text_color=YELLOW).pack(pady=(16, 4))
+        ctk.CTkLabel(top, text="Session key (already copied to your clipboard):",
+                     font=(FONT, 12), text_color=MUTED).pack(pady=(6, 2))
+        key = TextLine(top, "", height=44)
+        key.pack(fill="x", padx=20, pady=(0, 4))
+        key.set(self.invite_text)
+        row = ctk.CTkFrame(top, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=(4, 18))
+
+        def cp(b):
+            self.copy_text(self.invite_text)
+            self.flash(b, "Copied ✓")
+        b_cp = self.btn(row, "Copy key", lambda: cp(b_cp), h=36)
+        b_cp.pack(side="left", expand=True, fill="x", padx=(0, 6))
+        self.btn(row, "Close", top.destroy, CARD2, LINE, h=36).pack(side="left", expand=True, fill="x")
 
     # ------------------------------------------------------------ moderation
     def my_role(self):
@@ -1999,27 +2190,72 @@ class App(ctk.CTk):
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ admin panel
-    def show_admin(self):
+    def show_admin(self, tab=None):
+        """One window for the whole room control: ranks, permissions, kick, ban, ban list."""
         if self.awin and self.awin.winfo_exists():
             self.awin.deiconify()
+            if tab:
+                self.set_admin_tab(tab)
             return
         w = self.awin = ctk.CTkToplevel(self)
-        w.geometry("560x560")
+        w.geometry("600x620")
         w.configure(fg_color=BG)
         self.brand(w, "Admin panel")
-        self.panel_head(w, "Roles and permissions")
+        self.panel_head(w, "Room control")
+        self.admin_seg = ctk.CTkSegmentedButton(
+            w, values=["Members", "Ban list"], command=self.set_admin_tab, height=36,
+            font=(FONT, 13, "bold"), selected_color=ACC, selected_hover_color=ACC_H,
+            unselected_color=CARD2, unselected_hover_color=LINE, fg_color=CARD2, text_color=TXT)
+        self.admin_seg.pack(fill="x", padx=12, pady=(12, 0))
+        self.admin_seg.set(self.admin_tab)
         self.admin_body = ctk.CTkScrollableFrame(w, fg_color="transparent")
         self.admin_body.pack(fill="both", expand=True, padx=12, pady=12)
-        self.rebuild_admin()
+        if self.admin_tab == "Members":
+            self.rebuild_admin()
+        else:
+            self.refresh_bans()
 
-    def rebuild_admin(self):
-        if not (self.awin and self.awin.winfo_exists()) or not self.node:
+    def set_admin_tab(self, tab):
+        self.admin_tab = tab
+        if self.awin and self.awin.winfo_exists():
+            try:
+                self.admin_seg.set(tab)
+            except Exception:
+                pass
+        if tab == "Ban list":
+            self.refresh_bans()
+        else:
+            self.rebuild_admin()
+
+    def refresh_bans(self):
+        rid = self.node.rid if self.node else None
+        if rid is None:
             return
+
+        def work():
+            r = self.link.req("ban_list", room=rid)
+            if r.get("ok"):
+                self.uq.put({"t": "ban_list", "bans": r["bans"]})
+            else:
+                self.q.put(f"Ban list failed: {r.get('err')}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def admin_clear(self, heading):
+        """Empty the one body frame of the admin window and give it a section title."""
         body = self.admin_body
         for c in body.winfo_children():
             c.destroy()
+        self.cap(body, heading)
+        return body
+
+    def rebuild_admin(self):
+        if not (self.awin and self.awin.winfo_exists()) or not self.node or self.admin_tab != "Members":
+            return
         room = self.node.room
-        if self.my_role() == "owner":
+        owner = self.my_role() == "owner"
+        perms = self.my_perms()
+        if owner:
+            body = self.admin_clear("Rank, permissions and the member limit")
             card = ctk.CTkFrame(body, fg_color=CARD, corner_radius=12, border_width=1, border_color=LINE)
             card.pack(fill="x")
             row = ctk.CTkFrame(card, fg_color="transparent")
@@ -2041,39 +2277,43 @@ class App(ctk.CTk):
                         self.q.put(f"Limit failed: {r.get('err')}")
                 threading.Thread(target=work, daemon=True).start()
             self.btn(row, "Set", set_limit, CARD2, LINE, h=32, width=60).pack(side="left")
-            self.cap(body, "Members - roles and admin permissions (owner only)")
+            self.cap(body, "Members - tap a rank or a permission to change it")
         else:
-            self.cap(body, "Admin permissions you were given:")
-            pl = ", ".join(PERM_LABELS[k] for k, on in self.my_perms().items() if on) or "none"
-            ctk.CTkLabel(body, text=pl, font=(FONT, 13), text_color=TXT, anchor="w").pack(fill="x", padx=4)
+            have = ", ".join(PERM_LABELS[k] for k, on in perms.items() if on) or "none"
+            body = self.admin_clear(f"Admin permissions you were given: {have}")
         for m in room.get("members", []):
             if m["id"] == self.link.user["id"]:
                 continue
+            role = m.get("role", "member")
             card = ctk.CTkFrame(body, fg_color=CARD, corner_radius=12, border_width=1, border_color=LINE)
             card.pack(fill="x", pady=4)
             top = ctk.CTkFrame(card, fg_color="transparent")
             top.pack(fill="x", padx=14, pady=(10, 0))
-            badge, color = ROLE_BADGE.get(m["role"], ROLE_BADGE["member"])
+            badge, color = ROLE_BADGE.get(role, ROLE_BADGE["member"])
             ctk.CTkLabel(top, text=m["name"], font=(FONT, 14, "bold"), anchor="w").pack(side="left")
             ctk.CTkLabel(top, text=badge, font=(FONT, 11, "bold"), text_color=color).pack(side="left", padx=8)
-            if self.my_role() == "owner":
-                is_admin = m["role"] == "admin"
-
+            if owner:
                 def toggle(q=m):
                     if q["role"] == "admin":
                         self.req_admin(q["id"], False, {})
                     else:
-                        perms = {k: q.get("perms", {}).get(k, False) for k in PERM_LABELS}
-                        self.req_admin(q["id"], True, perms)
-                self.btn(top, "Remove admin" if is_admin else "Make admin", toggle, CARD2, LINE,
-                         h=30, width=110).pack(side="right")
-            if m["role"] == "admin" and self.my_role() == "owner":
+                        self.req_admin(q["id"], True, {k: q.get("perms", {}).get(k, False) for k in PERM_LABELS})
+                self.btn(top, "Remove admin" if role == "admin" else "Make admin", toggle,
+                         CARD2, LINE, h=30, width=110).pack(side="right")
+            if role == "member":
+                if owner or perms.get("kick"):
+                    self.btn(top, "Kick", lambda q=m["id"]: self.kick_user(q), CARD2, LINE, h=30,
+                             width=64).pack(side="right", padx=(0, 4))
+                if owner or perms.get("ban"):
+                    self.btn(top, "Ban", lambda q=m["id"]: self.ban_user(q), "#5c2a2a", "#7a3838",
+                             h=30, width=60).pack(side="right", padx=(0, 4))
+            if role == "admin" and owner:
                 prow = ctk.CTkFrame(card, fg_color="transparent")
                 prow.pack(fill="x", padx=14, pady=(4, 10))
                 boxes = {}
                 for k, label in PERM_LABELS.items():
                     cb = ctk.CTkCheckBox(prow, text=label, font=(FONT, 12), fg_color=ACC,
-                                         hover_color=ACC_H, checkmark_color=BG)
+                                         hover_color=ACC_H, checkmark_color=ACC_TXT)
                     if m.get("perms", {}).get(k):
                         cb.select()
                     cb.pack(side="left", padx=(0, 12))
@@ -2095,35 +2335,12 @@ class App(ctk.CTk):
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ ban panel
-    def show_bans(self):
-        if self.bwin and self.bwin.winfo_exists():
-            self.bwin.deiconify()
-            return
-        w = self.bwin = ctk.CTkToplevel(self)
-        w.geometry("520x400")
-        w.configure(fg_color=BG)
-        self.brand(w, "Bans")
-        self.panel_head(w, "Banned from this room")
-        self.ban_body = ctk.CTkScrollableFrame(w, fg_color="transparent")
-        self.ban_body.pack(fill="both", expand=True, padx=12, pady=12)
-        rid = self.node.rid if self.node else None
-        if rid is None:
-            return
-
-        def work():
-            r = self.link.req("ban_list", room=rid)
-            if r.get("ok"):
-                self.uq.put({"t": "ban_list", "bans": r["bans"]})
-            else:
-                self.q.put(f"Ban list failed: {r.get('err')}")
-        threading.Thread(target=work, daemon=True).start()
-
     def rebuild_bans(self, bans):
-        if not (self.bwin and self.bwin.winfo_exists()):
+        """The ban list is a section of the admin window, not a window of its own."""
+        if not (self.awin and self.awin.winfo_exists()) or self.admin_tab != "Ban list":
             return
-        body = self.ban_body
-        for c in body.winfo_children():
-            c.destroy()
+        can = self.my_role() == "owner" or self.my_perms().get("unban")
+        body = self.admin_clear(f"Banned from this room ({len(bans)})")
         if not bans:
             ctk.CTkLabel(body, text="No banned users in this room.", font=(FONT, 13),
                          text_color=MUTED).pack(pady=30)
@@ -2141,13 +2358,10 @@ class App(ctk.CTk):
                     rr = self.link.req("unban", room=self.node.rid, user=q)
                     if rr.get("ok"):
                         self.q.put(f"User {q} unbanned")
-                        r2 = self.link.req("ban_list", room=self.node.rid)
-                        if r2.get("ok"):
-                            self.uq.put({"t": "ban_list", "bans": r2["bans"]})
+                        self.refresh_bans()
                     else:
                         self.q.put(f"Unban failed: {rr.get('err')}")
                 threading.Thread(target=work, daemon=True).start()
-            can = self.my_role() == "owner" or self.my_perms().get("unban")
             if can:
                 self.btn(r, "Unban", unban, CARD2, LINE, h=30, width=80).pack(side="right", padx=12, pady=8)
 
@@ -2193,9 +2407,13 @@ class App(ctk.CTk):
                         ("rtl", {"justify": "right"}), ("ltr", {"justify": "left"})):
             self.pm_box.tag_config(tag, **kw)
         self.pm_box.configure(state="disabled")
+        self.pm_typing = ctk.CTkLabel(right, text="", font=(FONT, 11, "italic"),
+                                      text_color=MUTED, anchor="w")
+        self.pm_typing.pack(fill="x", padx=18, pady=(0, 2))
         crow = ctk.CTkFrame(right, fg_color="transparent")
         crow.pack(fill="x", padx=14, pady=12)
-        self.pm_in = TextLine(crow, "Type a message...", on_enter=self.send_pm)
+        self.pm_in = TextLine(crow, "Type a message...", on_enter=self.send_pm,
+                              on_type=lambda: self.note_typing(self.sel_friend))
         self.pm_in.pack(side="left", fill="x", expand=True)
         self.btn(crow, "Send", self.send_pm, h=40, width=80).pack(side="left", padx=(8, 0))
 
@@ -2292,7 +2510,36 @@ class App(ctk.CTk):
             self.btn(r, f"Chat ({unread})" if unread else "Chat",
                      lambda q=f["name"]: self.open_pm(q), CARD2, LINE, h=28, width=76
                      ).pack(side="right", padx=4)
+        self.rebuild_rail()
         self.update_badges()
+
+    def rebuild_rail(self):
+        """The left menu keeps a live friend list: dot + name + unread, no extra window."""
+        if not (self.fr_rail and self.fr_rail.winfo_exists()):
+            return
+        for c in self.fr_rail.winfo_children():
+            c.destroy()
+        self.rail_rows = {}
+        flist = self.friends.get("friends", [])
+        on = sum(1 for f in flist if f.get("online"))
+        setw(self.lbl_fr_online, text=(f"{on}/{len(flist)} online" if flist else ""))
+        if not flist:
+            ctk.CTkLabel(self.fr_rail, text="No friends yet.", font=(FONT, 11),
+                         text_color=MUTED, anchor="w").pack(fill="x", pady=4)
+            return
+        for f in flist:
+            r = ctk.CTkFrame(self.fr_rail, fg_color=CARD2, corner_radius=8)
+            r.pack(fill="x", pady=2)
+            dot = ctk.CTkLabel(r, text="●", font=(FONT, 11),
+                               text_color=(GREEN if f.get("online") else GRAY))
+            dot.pack(side="left", padx=(9, 4), pady=5)
+            un = self.pm_unread.get(f["name"], 0)
+            nm = ctk.CTkLabel(r, text=f["name"] + (f"  ({un})" if un else ""), font=(FONT, 12),
+                              anchor="w", cursor="hand2")
+            nm.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            for w in (r, nm, dot):
+                w.bind("<Button-1>", lambda e, q=f["name"]: self.open_pm(q))
+            self.rail_rows[f["name"]] = (r, dot, nm)
 
     # ------------------------------------------------------------ friend to friend chat
     def open_pm(self, name):
@@ -2325,10 +2572,12 @@ class App(ctk.CTk):
         self.pms.setdefault(name, []).append((who, text, ts))
         if name == self.sel_friend and self.page == "friends":
             self.chat_add(who, text, "me" if mine else "them", ts, box=self.pm_box)
+            self.beep()
             return
         if not mine:            # nobody is looking at it: count it on the tab and on the row
             self.pm_unread[name] = self.pm_unread.get(name, 0) + 1
             self.rebuild_friends()
+            self.note_pm(name, text)
             self.beep()
 
     def send_pm(self):
@@ -2346,10 +2595,18 @@ class App(ctk.CTk):
                 self.uq.put({"t": "pm_err", "err": r.get("err") or "could not send"})
         threading.Thread(target=work, daemon=True).start()
 
+    def focused(self):
+        """True only while this window is the thing on screen you are talking through."""
+        try:
+            return self.state() != "iconic" and bool(self.winfo_focuses())
+        except Exception:
+            return False
+
     def beep(self):
-        if winsound:
+        """The chat ding rings for the app you are looking at - never over a game."""
+        if winsound and self.focused():
             try:
-                winsound.MessageBeep(-1)
+                winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS)
             except Exception:
                 pass
 
@@ -2379,8 +2636,43 @@ class App(ctk.CTk):
         box.configure(state="normal")
         box.insert("end", f"{who}  {stamp}\n", (tag, j))
         box.insert("end", (f"\u200f{text}\u200f" if rtl else text) + "\n\n", ("body", j))
+        box.mark_set("insert", "end-1c")      # no stray caret in the read-only log
         box.see("end")
         box.configure(state="disabled")
+
+    # ------------------------------------------------------------ "is typing"
+    def note_typing(self, to=None):
+        """Say it on the wire at most twice in five seconds - enough for the dots."""
+        if not (self.link and self.link.alive) or not self.node and not to:
+            return
+        key = to or "room"
+        now = time.time()
+        if now - self.type_t.get(key, 0.0) < 2.5:
+            return
+        self.type_t[key] = now
+        self.link.notify_server("typing", **({"user": to} if to else {}))
+
+    def typing_line(self, names):
+        if not names:
+            return ""
+        if len(names) == 1:
+            return f"{names[0]} is typing ..."
+        if len(names) == 2:
+            return f"{names[0]} and {names[1]} are typing ..."
+        return f"{len(names)} people are typing ..."
+
+    def tick_typing(self):
+        """Drop the stale names and repaint both indicators."""
+        now = time.time()
+        live = self.typing_room = {k: v for k, v in self.typing_room.items()
+                                   if v > now and self.node}
+        if self.lbl_typing.winfo_exists():
+            setw(self.lbl_typing, text=self.typing_line(sorted(live)))
+        who = self.sel_friend
+        live = self.typing_pm = {k: v for k, v in self.typing_pm.items()
+                                 if v > now and k == who}
+        if self.pm_typing.winfo_exists():
+            setw(self.pm_typing, text=self.typing_line(sorted(live)))
 
     def send_chat(self):
         txt = self.chat_in.value()
@@ -2393,6 +2685,7 @@ class App(ctk.CTk):
         self.chat_in.set("")
         if n.send_chat(txt):
             self.chat_add("You", txt, "me")
+            self.beep()
         else:
             self.chat_add("system", "Could not send - check the connection to the server", "sys")
 
@@ -2508,8 +2801,11 @@ class App(ctk.CTk):
             nm, tx, ts = self.cq.get()
             self.chat_add(nm, tx, "them", ts)
             self.beep()
+            for k in [k for k in self.typing_room if nm.startswith(k)]:
+                self.typing_room.pop(k, None)   # they finished the line they were typing
         while not self.uq.empty():
             self.on_event(self.uq.get_nowait())
+        self.tick_typing()
         n = self.node
         if not self.link:
             want = "login"
@@ -2555,10 +2851,19 @@ class App(ctk.CTk):
                     self.my_rooms[i] = room
                     self.on_my_rooms(self.my_rooms)
                     break
+        elif t == "typing":
+            who, rid = ev.get("from"), ev.get("room")
+            if who and who != self.my_name:
+                if rid:
+                    if self.node and rid == self.node.rid:
+                        self.typing_room[who] = time.time() + 4
+                else:
+                    self.typing_pm[who] = time.time() + 4
         elif t == "chat":
             if self.node and ev.get("room") == self.node.rid \
                     and ev.get("from") != self.my_name:
-                self.cq.put((ev.get("from", "?"), ev.get("text", ""), ev.get("ts")))
+                who = with_rank(ev.get("from", "?"), ev.get("role"))
+                self.cq.put((who, ev.get("text", ""), ev.get("ts")))
         elif t == "kicked":
             if self.node and ev.get("room") == self.node.rid:
                 self.q_put(f"You were kicked from the room by {ev.get('by')}")
@@ -2587,6 +2892,7 @@ class App(ctk.CTk):
                 self.pm_show()
         elif t == "friend_req":
             self.q_put(f"{ev.get('from')} sent you a friend request")
+            self.note_friend_req(ev.get("from", "?"))
             self.refresh_friends()
         elif t == "pm":
             self.pm_add(ev.get("from", "?"), ev.get("from", "?"), ev.get("text", ""), ev.get("ts"))
@@ -2640,8 +2946,7 @@ class App(ctk.CTk):
         elif self.err:
             setw(self.lbl_acct, text=self.err, text_color=RED)
         else:
-            setw(self.lbl_acct, text=f"signed in as {self.my_name}\n{APP_NAME} network online",
-                 text_color=MUTED)
+            setw(self.lbl_acct, text=f"{APP_NAME} network online", text_color=MUTED)
         for b, t, in ((self.b_create, "Create room"), (self.b_join, "Join room")):
             setw(b, text=t, state="normal")
 
@@ -2651,7 +2956,7 @@ class App(ctk.CTk):
         if not self.node:
             return
         room = self.node.room
-        key = (tuple(sorted(m["id"] for m in room.get("members", []))),
+        key = (tuple(sorted((m["id"], m.get("role")) for m in room.get("members", []))),
                room.get("my_role"), json.dumps(room.get("my_perms") or {}, sort_keys=True))
         if key == self.role_key:
             return
@@ -2663,25 +2968,30 @@ class App(ctk.CTk):
                 pass
         self.rows = {}
         perms = self.my_perms()
+        mine_id = self.link.user["id"] if (self.link and self.link.user) else None
         for m in room.get("members", []):
             pid = m["id"]
-            if pid == self.link.user["id"]:
-                continue
-            r = ctk.CTkFrame(self.plist, fg_color=CARD2, corner_radius=10)
+            mine = pid == mine_id
+            r = ctk.CTkFrame(self.plist, fg_color=(LINE if mine else CARD2), corner_radius=10)
             r.pack(fill="x", pady=3, padx=4)
             r.grid_columnconfigure(1, weight=1)
             role = m.get("role", "member")
             badge, color = ROLE_BADGE.get(role, ROLE_BADGE["member"])
             ctk.CTkLabel(r, text=badge.split(" ", 1)[0], font=(FONT, 18), text_color=color
                          ).grid(row=0, column=0, rowspan=2, padx=(12, 8), pady=8)
-            name = ctk.CTkLabel(r, text=m.get("name", "?"), font=(FONT, 14, "bold"), anchor="w")
+            name = ctk.CTkLabel(r, text=with_rank(m.get("name", "?"), role) + ("   ·   you" if mine else ""),
+                                font=(FONT, 14, "bold"), anchor="w")
             name.grid(row=0, column=1, sticky="w", pady=(8, 0))
+            # the virtual IP only - "offline" is shown once, in the ping column
             info = ctk.CTkLabel(r, text=m.get("vip", ""), font=(FONT, 11), text_color=MUTED, anchor="w")
             info.grid(row=1, column=1, sticky="w", pady=(0, 8))
             ping = ctk.CTkLabel(r, text="...", font=(FONT, 15, "bold"))
             ping.grid(row=0, column=2, rowspan=2, padx=(8, 6))
             btns = ctk.CTkFrame(r, fg_color="transparent")
             btns.grid(row=0, column=3, rowspan=2, padx=(0, 12))
+            if mine:
+                self.rows[pid] = (r, name, info, ping)
+                continue
             cp = ctk.CTkButton(btns, text="Copy IP", width=64, height=26, font=(FONT, 11), corner_radius=8,
                                fg_color=CARD, hover_color=LINE, command=lambda q=pid: self.copy_peer_ip(q))
             cp.pack(side="left", padx=2)
@@ -2707,22 +3017,33 @@ class App(ctk.CTk):
             self.clipboard_append(p["vip"])
 
     def update_room(self, n):
-        setw(self.lbl_you, text=f"{self.my_name}   ·   {n.vip}   ·   role: "
+        setw(self.lbl_you, text=f"{with_rank(self.my_name, self.my_role())}   ·   {n.vip}   ·   role: "
                                 f"{ROLE_BADGE.get(self.my_role(), ROLE_BADGE['member'])[0]}")
         self.update_room_rows()
+        mine_id = self.link.user["id"] if (self.link and self.link.user) else None
         online = 0
         for pid, row in self.rows.items():
             p = n.peers.get(pid)
             if not p:
                 continue
             r, name, info, ping = row
-            setw(name, text=p.get("name", "?"))
+            if pid == mine_id:
+                # my own line: the round trip to the VPS is the number that matters
+                if n.srv_rtt:
+                    setw(ping, text=f"{n.srv_rtt:.0f} ms",
+                         text_color=GREEN if n.srv_rtt < 60 else YELLOW if n.srv_rtt < 120 else RED)
+                else:
+                    setw(ping, text="...", text_color=YELLOW)
+                online += 1
+                continue
+            setw(name, text=with_rank(p.get("name", "?"), p.get("role")))
             if p.get("timed_out"):
                 setw(ping, text="timeout", text_color=RED)
-                setw(info, text=f"{p.get('vip', '')}  ·  no answer (timed out)")
+                setw(info, text=f"{p.get('vip', '')}  ·  no answer since "
+                                f"{time.strftime('%H:%M:%S', time.localtime(p.get('last', 0)))}")
             elif not p.get("online"):
                 setw(ping, text="offline", text_color=GRAY)
-                setw(info, text=f"{p.get('vip', '')}  ·  offline")
+                setw(info, text=p.get("vip", ""))
             else:
                 rtt = p.get("rtt")
                 if rtt is None:
