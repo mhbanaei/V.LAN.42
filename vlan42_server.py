@@ -850,6 +850,14 @@ class Server:
         cfg["staff"] = sorted(got)
         save_cfg(cfg)
         self.cfg = cfg
+        u = self.user_by_name(name)
+        if u:                              # a panel already open on their screen answers now,
+            c = self.conns.get(u["id"])    # not only after the next sign-in
+            if c:
+                try:
+                    c.push({"t": "staff", "on": bool(on)})
+                except Exception:
+                    pass
         if on and not was:
             return f"{name} is management now: the app shows the admin panel to that account."
         if was and not on:
@@ -865,10 +873,17 @@ class Server:
             return {"t": "admin", "ok": False, "err": "This is not the management console"}
         if c.user and c.user["username"].lower() not in staff_users(self.cfg):
             return {"t": "admin", "ok": False, "err": "This account is not management"}
-        words = (m.get("cmd") or "").split()
+        return self.admin_cmd(m.get("cmd"))
+
+    def admin_cmd(self, cmd):
+        """The commands themselves. The server's own window runs them at once - whoever can
+        type at that keyboard owns the machine, and that is the whole credential."""
+        words = (cmd or "").split()
         pair = bool(words) and words[0].lower() in ("set", "remove")
         verb = " ".join(words[:2]).lower() if pair else (words[0].lower() if words else "")
         arg = " ".join(words[2:] if pair else words[1:]).strip()
+        if verb in ("help", "-h", "?"):
+            return {"t": "admin", "ok": True, "out": HELP}
         if verb in ("users", "rooms", "traffic"):
             return {"t": "admin", "ok": True, "rows": self.admin_rows(verb),
                     "out": self.admin_text(verb)}
@@ -884,10 +899,10 @@ class Server:
                 return {"t": "admin", "ok": False, "err": f"No user named {arg}"}
             return {"t": "admin", "ok": True, "out": self.admin_staff(arg, verb == "set admin")}
         if verb == "set limit" and arg:
-            words = arg.split()
-            if len(words) != 2 or not (words[0].isdigit() and words[1].isdigit()):
+            bits = arg.split()
+            if len(bits) != 2 or not (bits[0].isdigit() and bits[1].isdigit()):
                 return {"t": "admin", "ok": False, "err": "Use: set limit <room id> <2-64>"}
-            rid, lim = int(words[0]), int(words[1])
+            rid, lim = int(bits[0]), int(bits[1])
             room = self.db.one("SELECT * FROM rooms WHERE id=?", (rid,))
             if not room:
                 return {"t": "admin", "ok": False, "err": f"No room with id {rid}"}
@@ -1217,6 +1232,28 @@ class Server:
             s.close()
         return b'"hello"' in buf
 
+    def console_loop(self):
+        """The team types right here, into the window the server runs in: `set admin erfan`.
+        Nothing of this travels over the network and nothing of it is in the players' copy of
+        the app - the credential is being the person standing at this keyboard."""
+        while True:
+            try:
+                line = input("")
+            except (EOFError, OSError, ValueError):
+                log("console: this window has no keyboard to type in - "
+                    "use the panel inside the app, or run the command next to the server.")
+                return
+            line = (line or "").strip()
+            if not line:
+                continue
+            if line.lower() in ("exit", "quit"):
+                print("This window is the server. Close it (or press Ctrl+C) to stop it.",
+                      flush=True)
+                continue
+            r = self.admin_cmd(line)
+            print((r.get("out") or "Done.") if r.get("ok")
+                  else (r.get("err") or "The server refused that."), flush=True)
+
     def run(self):
         if self.other_instance():
             log(f"A V.Lan.42 server is already running on port {self.tcp_port}.")
@@ -1236,6 +1273,8 @@ class Server:
         if self.udp_ready:
             log(f"Players can join now. Still need inbound {self.tcp_port} TCP *and* UDP")
             log(f"   in the firewall of your hosting panel, not only inside Windows.")
+        log("This window answers the team's commands too - type help to see them.")
+        threading.Thread(target=self.console_loop, daemon=True).start()
         while True:
             try:
                 sock, addr = srv.accept()
@@ -1447,6 +1486,11 @@ class Conn:
                     self.send(r)
                 except OSError:
                     break
+        except OSError as ex:
+            # a player closing the app, or a network dropping, resets the socket - that is
+            # how a session normally ends, and a traceback over it buries the lines that matter
+            who = self.user["username"] if self.user else self.addr[0]
+            log(f"conn closed: {who} ({getattr(ex, 'strerror', None) or ex})")
         except Exception:
             log(f"conn {self.addr} error:\n{traceback.format_exc()}")
         finally:
@@ -1603,7 +1647,10 @@ class Console:
         return 0
 
 
-HELP = """V.Lan.42 - the team's own commands (run them on the VPS, next to vlan42_server.py)
+HELP = """V.Lan.42 - the team's own commands
+
+Type them into the window that is running the server, or next to it:
+    python vlan42_server.py set admin erfan
 
   status                 what is running right now
   users                  every account: made, last seen, its PC, its rooms, its data
@@ -1614,9 +1661,9 @@ HELP = """V.Lan.42 - the team's own commands (run them on the VPS, next to vlan4
   set limit <room> <n>   how many players room <room> may hold (2-64)
   help                   this list
 
-Nothing here needs a password, and nothing here is in the player's copy of the app:
-the console proves itself with a stamp made from vlan42_staff.key, which lives only
-on this server. A stamp is worth one minute."""
+Nothing here needs a password: whoever can type in the server's window is whoever holds
+the VPS. The same commands reach the server over the network only with a stamp made from
+vlan42_staff.key, which lives on this machine alone - a stamp is worth one minute."""
 
 
 def main():

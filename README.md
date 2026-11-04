@@ -31,7 +31,7 @@ handed an address, it is a bug - report it.
 1. Put `vlan42_server.py`, `start_server.bat` and (optional) `vlan42_check.py` in one
    folder on the VPS.
 2. Run **`start_server.bat` as Administrator** once, so it can add the firewall rules.
-3. Keep the window open - that window *is* the server.
+3. Keep the window open - that window *is* the server, and it answers the team's commands.
 
 The script installs `cryptography`, opens TCP/UDP 4242 in the Windows firewall, writes
 `vlan42_servers.txt` if it is missing, detects the public IP of the VPS and adds it to
@@ -67,28 +67,32 @@ to a player's machine** - it is what makes the team the team.
 
 ### The management console
 
-Typed at the server's own window, next to `vlan42_server.py`:
+**Type them into the window that is running the server** - the one `start_server.bat`
+opened. `python vlan42_server.py <words>` next to it works too, from any other window on
+that machine.
 
 ```
-python vlan42_server.py status                  what is running right now
-python vlan42_server.py users                   every account: made, seen, its PC, its rooms, its data
-python vlan42_server.py rooms                   every room: owner, members, who is in it now
-python vlan42_server.py traffic                 bytes the relay moved, per player per day
-python vlan42_server.py set admin <name>        let that account open the panel inside the app
-python vlan42_server.py remove admin <name>     take that right back
-python vlan42_server.py set limit <room> <n>    how many players a room may hold (2-64)
-python vlan42_server.py help                    this list
+status                  what is running right now
+users                   every account: made, last seen, its PC, its rooms, its data
+rooms                   every room: owner, members, who is in it now
+traffic                 bytes the relay moved, per player per day
+set admin <name>        let that account open the panel inside the app
+remove admin <name>     take that right back
+set limit <room> <n>    how many players a room may hold (2-64)
+help                    this list
 ```
 
-There is no password to type: the console proves itself with a stamp made from
-`vlan42_staff.key` - which lives only on this server - and it only ever speaks over
-loopback. A stamp is worth one minute.
+Typed in the server's own window there is no password: whoever can type there owns the
+machine. Run over the network - which is what the app's panel does - the same commands
+only answer with a stamp made from `vlan42_staff.key`, that file lives on this server
+alone, and a stamp is worth one minute.
 
 The same facts as a table inside the app: **Settings → Open the console**, which appears
 only for an account the team vouched for. *Users / Rooms / Traffic*, a click on a column
 header to sort, a box to search, `Make team` / `Remove from team` on a user row, and each
-room's player ceiling typed in its own row. A fresh vouch reaches that account the next
-time it signs in.
+room's player ceiling typed in its own row. `set admin` opens that panel on the
+account's screen the moment you type it - no signing out and back in for them, and
+`remove admin` closes it the same way.
 
 ---
 
@@ -256,9 +260,11 @@ Run them one at a time - they share the config file and the test ports.
 * **The management door needs a key that is not in the app.** A player who has the whole
   source code still has nothing: `do_admin` accepts a command only with a stamp made by a
   process that can read `vlan42_staff.key` (AES-256-GCM over the minute it was minted,
-  AAD `vlan42-staff`), and that file lives on the VPS alone. A connection that is also
-  signed in as a player needs a second thing - that username has to appear in the `staff`
-  list the server keeps in its *own* `vlan42_server.json`, which no client writes. A stamp
+  AAD `vlan42-staff`), and that file lives on the VPS alone. The one way in that needs no
+  stamp is typing into the server's own window - that is the machine itself, so it is only
+  open to whoever holds the VPS. A connection that is also signed in as a player needs a
+  second thing - that username has to appear in the `staff` list the server keeps in its
+  *own* `vlan42_server.json`, which no client writes. A stamp
   copied off the wire is worthless a minute later, `remove admin` closes the door on the
   next sign-in, and every refusal says the same flat "this is not the management console".
 * **Three accounts to a PC, no more.** The app hashes what Windows and the BIOS say about

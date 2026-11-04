@@ -1485,6 +1485,7 @@ TR = {
     "Limit": "سقف",
     "Day": "روز",
     "Search...": "جستجو...",
+    "Management access for this account changed": "دسترسی مدیریت این حساب تغییر کرد",
     "The server refused that.": "سرور این کار را نپذیرفت.",
     "Use a whole number from 2 to 64": "یک عدد صحیح بین ۲ تا ۶۴ بنویسید.",
 }
@@ -3016,6 +3017,17 @@ class App(ctk.CTk):
         setw(self.b_auth, text="Sign in", state="normal")
         setw(self.lbl_login_err, text=ev.get("err") or "", text_color=RED if ev.get("err") else MUTED)
 
+    def on_staff(self, ev):
+        """The team just vouched for this account, or stopped vouching. The card and the
+        panel follow at once - nobody has to sign out and in again to see what they were
+        given."""
+        self.staff = bool(ev.get("on"))
+        if self.page == "settings":
+            self.show_settings_cards()
+        if self.cwin and self.cwin.winfo_exists():
+            self.console_load()
+        self.q_put(T("Management access for this account changed"))
+
     def on_link_down(self, why):
         self.uq.put({"t": "link_down", "why": why})
 
@@ -4350,6 +4362,8 @@ class App(ctk.CTk):
         elif t == "con_done":
             self.console_answer(ev["r"])
             self.console_load()
+        elif t == "staff":
+            self.on_staff(ev)
         elif t == "my_rooms":
             self.on_my_rooms(ev["rooms"])
         elif t == "enter_room":

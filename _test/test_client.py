@@ -18,6 +18,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HOST, PORT = "127.0.0.1", 45242
 STAFF_KEY = hashlib.sha256(b"the team key of this test").hexdigest()
 PASS, FAIL = [], []
+SRV_OUT = []          # every line the test server's own window printed
+
+
+def read_window(proc):
+    def work():
+        for line in proc.stdout:
+            SRV_OUT.append(line.rstrip())
+    threading.Thread(target=work, daemon=True).start()
 
 
 def boot_server():
@@ -30,8 +38,10 @@ def boot_server():
     # starts so the checks below and the server agree on what a real stamp looks like.
     with open(os.path.join(HERE, "vlan42_staff.key"), "w", encoding="utf-8") as f:
         f.write(STAFF_KEY)
-    proc = subprocess.Popen([sys.executable, "vlan42_server.py"], cwd=HERE,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen([sys.executable, "-u", "vlan42_server.py"], cwd=HERE,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, encoding="utf-8", bufsize=1)
+    read_window(proc)
     for _ in range(50):
         try:
             socket.create_connection((HOST, PORT), timeout=0.5).close()
@@ -194,7 +204,7 @@ def join(c, host, code, pwd):
              "pending": False}
     return r
 
-def main():
+def main(srv):
     a = TClient("alice")
     r = a.req("register", u="alice", p="pw123")
     check("register alice", r.get("ok"), str(r))
@@ -584,6 +594,8 @@ def main():
 
     out, rc = console("set", "admin", "alice")
     check("the server window vouches for a name", rc == 0 and "is management now" in out, out)
+    check("and the signed-in account hears about it at once",
+          a.drain_push("staff", timeout=6) is not None)
     r = a.req("login", u="alice", p="pw123")
     check("the app is told this account is the team", r.get("ok") and r.get("staff") is True, str(r))
     r = admin(a, "users")
@@ -634,6 +646,44 @@ def main():
     r = admin(a, "status")
     check("status counts the network", r.get("ok") and "accounts" in r.get("out", ""), str(r))
 
+    # ---- typed straight into the window the server itself runs in
+    def type_at_window(cmd, want):
+        mark = len(SRV_OUT)
+        srv.stdin.write(cmd + "\n")
+        srv.stdin.flush()
+        end = time.time() + 12
+        while time.time() < end:
+            got = "\n".join(SRV_OUT[mark:])
+            if want in got:
+                return got
+            time.sleep(0.1)
+        return "\n".join(SRV_OUT[mark:])
+
+    out = type_at_window("status", "accounts")
+    check("the server's own window answers status", "accounts" in out, out[-200:])
+    check("and types out the list of accounts", "alice" in type_at_window("users", "alice"),
+          out[-200:])
+    out = type_at_window("set admin bob", "is management now")
+    check("typing set admin at the window vouches for a name", "is management now" in out, out[-200:])
+    push = b.drain_push("staff", timeout=6)
+    check("the signed-in account is told so, without signing in again",
+          push is not None and push.get("on") is True, str(push))
+    r = admin(b, "users")
+    check("and the panel opens for them straight away", r.get("ok"), str(r))
+    out = type_at_window("remove admin bob", "not management any more")
+    check("typing remove admin takes the right back", "not management any more" in out, out[-200:])
+    push = b.drain_push("staff", timeout=6)
+    check("and the door closes on their screen too",
+          push is not None and push.get("on") is False, str(push))
+    check("with nothing more they can ask", not admin(b, "users").get("ok"))
+    check("help at the window prints the list",
+          "set limit" in type_at_window("help", "set limit"))
+    check("quit does not stop the server by accident",
+          "Close it" in type_at_window("quit", "Close it"))
+    check("an unknown word is answered, not thrown",
+          "Unknown command" in type_at_window("launch rocket", "Unknown command"))
+    check("and the server is still standing after all that typing", a.req("my_rooms").get("ok"))
+
     out, rc = console("remove", "admin", "alice")
     check("the server window takes the right back",
           rc == 0 and "not management any more" in out, out)
@@ -655,7 +705,7 @@ def main():
 if __name__ == "__main__":
     srv = boot_server()
     try:
-        main()
+        main(srv)
     finally:
         srv.terminate()
         srv.wait(timeout=5)

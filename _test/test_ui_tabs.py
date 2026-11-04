@@ -586,6 +586,25 @@ def main():
     check("remember-me carries on with the new password",
           vp.load_cfg().get("token") == "a-brand-new-token", str(vp.load_cfg()))
 
+    # ------------------------------------------------- the team saying yes, live
+    app.staff = False
+    app.select_tab("settings")
+    check("a player sees no way into the panel", app.team_card.winfo_manager() == "",
+          app.team_card.winfo_manager())
+    app.on_event({"t": "staff", "on": True})
+    app.update_idletasks()
+    check("the card appears the moment the team vouches, without signing out",
+          app.staff and app.team_card.winfo_manager() == "pack", app.team_card.winfo_manager())
+    lines = []
+    while not app.q.empty():
+        lines.append(app.q.get_nowait())
+    check("and the log says what changed",
+          any("Management access" in l for l in lines), str(lines[-2:]))
+    app.on_event({"t": "staff", "on": False})
+    check("and it is taken away the same way",
+          not app.staff and app.team_card.winfo_manager() == "")
+    app.staff = True
+
     # ------------------------------------------------- the team's own console
     def find(w, cls, text=None, out=None):
         out = [] if out is None else out
