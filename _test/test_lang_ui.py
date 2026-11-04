@@ -314,7 +314,7 @@ def main():
     # 5e. and nothing on a Persian screen stayed English. "English" itself is the name the
     # language switch offers, in its own tongue; the notice is a message somebody typed.
     NAMES = {"VLAN", "English", "Test", "hello", "sara", "milad", "negar", "042",
-             "war room", "my room", "friend room"}
+             "war room", "my room", "friend room", "reymit.ir/42level"}
 
     def shown(w, out):
         for c in w.winfo_children():
@@ -354,6 +354,12 @@ def main():
     settle(app)
     leak = [t for t in shown(app.pg_settings, set()) if is_english(t)]
     check("the password card and the console card speak Persian", not leak, str(leak[:4]))
+    check("the thank-you line is Persian too",
+          any(vp.has_rtl(t) and "سرور" in t for t in tu.labels(app.pg_settings)),
+          str(tu.labels(app.pg_settings)[:4]))
+    check("and a page does not repeat the name the menu already carries",
+          "VLAN" not in tu.labels(app.pg_settings) and "VLAN" in tu.labels(app.nav),
+          str(tu.labels(app.pg_settings)[:3]))
     rows_in = [{"id": 11, "name": "sara", "created": 1700000000.0, "last": 1700000600.0,
                 "machine": "0123456789ab", "rooms": 1, "online": True, "bytes": 4096,
                 "staff": False, "today": 4096},

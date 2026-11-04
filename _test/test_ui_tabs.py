@@ -161,8 +161,11 @@ def main():
           app.logo_img is not None and app.nav_logo is not None and app.card_logo is not None)
     check("logo on the login card and the tab bar",
           images(app.pg_login) and images(app.nav))
-    check("logo on the friends and logs headers",
-          images(app.pg_friends) and images(app.pg_logs))
+    check("a page carries its own title, not a second copy of the mark",
+          not images(app.pg_friends) and not images(app.pg_logs)
+          and "reymit.ir/42level" in labels(app.pg_friends)
+          and "reymit.ir/42level" in labels(app.pg_logs),
+          str(labels(app.pg_friends)[:3]))
     check("the tab bar writes VLAN and lets the picture be the 42",
           "VLAN" in labels(app.nav) and "42" not in labels(app.nav) and images(app.nav),
           str(labels(app.nav)[:4]))
@@ -443,10 +446,10 @@ def main():
     app.select_tab("room")
     check("clicking a stale Room tab falls back to Rooms", (app.tab, app.page) == ("start", "start"))
 
-    # 12. Logs is a page too and carries the same header
+    # 12. Logs is a page too, titled once and thanking the supporters
     app.select_tab("logs")
-    check("logs page with the brand header", app.page == "logs"
-          and {"VLAN", "Logs"} <= set(labels(app.pg_logs))
+    check("logs page with its own title and no second mark", app.page == "logs"
+          and "Logs" in labels(app.pg_logs) and "VLAN" not in labels(app.pg_logs)
           and "42" not in labels(app.pg_logs), str(labels(app.pg_logs)[:4]))
     app.q_put("a line for the log")
     app.tick()
@@ -589,6 +592,14 @@ def main():
     # ------------------------------------------------- the team saying yes, live
     app.staff = False
     app.select_tab("settings")
+    check("the settings page scrolls, so no card is ever out of reach",
+          isinstance(app.set_body, ctk.CTkScrollableFrame)
+          and app.team_card.master is app.set_body and app.pwd_card.master is app.set_body,
+          str(app.team_card.master))
+    check("and it thanks the people who pay for the servers",
+          "reymit.ir/42level" in labels(app.pg_settings)
+          and vp.REYMIT_URL == "https://reymit.ir/42level",
+          str(labels(app.pg_settings)[:4]))
     check("a player sees no way into the panel", app.team_card.winfo_manager() == "",
           app.team_card.winfo_manager())
     app.on_event({"t": "staff", "on": True})

@@ -39,6 +39,7 @@ IFACE = "V-Lan-42"
 APP_NAME = "V LAN 42"
 LOGO_FILE = "V.Lan.42.ico"
 GITHUB_URL = "https://github.com/mhbanaei"
+REYMIT_URL = "https://reymit.ir/42level"     # the team's support page: it pays for the servers
 DEFAULT_PORT = 4242
 MAX_ROOMS = 3
 # Users only ever sign in with a username and password - the app never asks for an address.
@@ -1369,6 +1370,8 @@ TR = {
     # ------------------------------------------------- settings
     "Language": "زبان",
     "Persian turns the whole app right-to-left.": "فارسی کل برنامه را راست‌به‌چپ می‌کند.",
+    "Your support keeps our servers running - thank you.":
+        "همایه‌ی شما باعث می‌شود سرورهای ما روشن بماند — سپاسگزاریم.",
     "Message sound": "صدای پیام",
     "On": "روشن",
     "Off": "خاموش",
@@ -2230,6 +2233,35 @@ class App(ctk.CTk):
         Label(row, text=title, font=(FONT, 13), text_color=MUTED).pack(side="right")
         return h
 
+    def support_line(self, parent, stack=False):
+        """The small thank-you, and the way to it. Honest words: the servers run on what the
+        supporters pay for, so this belongs on every page, not hidden in a corner."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        text = Label(row, text="Your support keeps our servers running - thank you.",
+                     font=(FONT, 10), text_color=MUTED, justify="left")
+        link = Label(row, text="reymit.ir/42level", font=(FONT, 10, "bold"),
+                     text_color=ACC, cursor="hand2")
+        link.bind("<Button-1>", lambda e: webbrowser.open(REYMIT_URL))
+        if stack:                       # the left menu is 290 wide, so the words go under
+            text.configure(wraplength=226)
+            text.pack(anchor="w")
+            link.pack(anchor="w", pady=(2, 0))
+        else:
+            text.pack(side="left")
+            link.pack(side="left", padx=(7, 0))
+        return row
+
+    def page_head(self, parent, title):
+        """The first line of a page. The name of the app is already in the bar above it, so
+        this says only where you are - and who to thank for the machine answering."""
+        h = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=0, border_width=1, border_color=LINE)
+        h.pack(fill="x")
+        row = ctk.CTkFrame(h, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=9)
+        self.support_line(row).pack(side="left")
+        Label(row, text=title, font=(FONT, 13, "bold"), text_color=MUTED).pack(side="right")
+        return h
+
     # ------------------------------------------------------------ top navigation
     def wordmark(self, parent, sz=16, icon=None, padx=0, word_only=False):
         """VLAN 42. The picture already is the 42, so wherever a 42 is drawn - inside this
@@ -2608,6 +2640,7 @@ class App(ctk.CTk):
         self.lbl_acct = Label(side, text="", font=(FONT, 12), text_color=MUTED, anchor="w",
                                      justify="left", wraplength=226)
         self.lbl_acct.pack(anchor="w", padx=30, pady=(2, 0))
+        self.support_line(side, stack=True).pack(anchor="w", padx=30, pady=(18, 0))
         self.blink_on = True
 
         # friends live on the Friends tab only - the menu stays a menu
@@ -2739,7 +2772,7 @@ class App(ctk.CTk):
 
     def build_logs(self):
         self.pg_logs = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
-        self.panel_head(self.pg_logs, "Logs")
+        self.page_head(self.pg_logs, "Logs")
         self.logbox = ctk.CTkTextbox(self.pg_logs, font=("Consolas", 11), wrap="word",
                                      fg_color=CARD, text_color=TXT, corner_radius=12)
         # a Persian line belongs on the right, an English one on the left
@@ -2760,10 +2793,13 @@ class App(ctk.CTk):
     # ------------------------------------------------------------ settings
     def build_settings(self):
         self.pg_settings = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
-        self.panel_head(self.pg_settings, "Settings")
-        card = ctk.CTkFrame(self.pg_settings, fg_color=CARD, corner_radius=14,
+        self.page_head(self.pg_settings, "Settings")
+        # three cards, and a window that is not always tall enough for all of them
+        self.set_body = ctk.CTkScrollableFrame(self.pg_settings, fg_color=BG)
+        self.set_body.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        card = ctk.CTkFrame(self.set_body, fg_color=CARD, corner_radius=14,
                             border_width=1, border_color=LINE)
-        card.pack(fill="x", padx=16, pady=16)
+        card.pack(fill="x", padx=12, pady=12)
         inner = ctk.CTkFrame(card, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=20, pady=18)
 
@@ -2788,7 +2824,7 @@ class App(ctk.CTk):
         self.seg_sound.set("Off" if not SOUND[0] else "On")
         self.btn(srow, "Test sound", self.beep, CARD2, LINE, h=34, width=100).pack(side="left", padx=(14, 0))
 
-        self.pwd_card = ctk.CTkFrame(self.pg_settings, fg_color=CARD, corner_radius=14,
+        self.pwd_card = ctk.CTkFrame(self.set_body, fg_color=CARD, corner_radius=14,
                                      border_width=1, border_color=LINE)
         pin = ctk.CTkFrame(self.pwd_card, fg_color="transparent")
         pin.pack(fill="both", expand=True, padx=20, pady=18)
@@ -2806,7 +2842,7 @@ class App(ctk.CTk):
         self.p_err = Label(prow, text="", font=(FONT, 12), text_color=MUTED, anchor="w")
         self.p_err.pack(side="left", padx=(14, 0))
 
-        self.team_card = ctk.CTkFrame(self.pg_settings, fg_color=CARD, corner_radius=14,
+        self.team_card = ctk.CTkFrame(self.set_body, fg_color=CARD, corner_radius=14,
                                       border_width=1, border_color=GOLD)
         tin = ctk.CTkFrame(self.team_card, fg_color="transparent")
         tin.pack(fill="both", expand=True, padx=20, pady=18)
@@ -2825,9 +2861,9 @@ class App(ctk.CTk):
         for card in (self.pwd_card, self.team_card):
             card.pack_forget()
         if self.link:
-            self.pwd_card.pack(fill="x", padx=16, pady=(0, 16))
+            self.pwd_card.pack(fill="x", padx=12, pady=(0, 12))
         if self.staff:
-            self.team_card.pack(fill="x", padx=16, pady=(0, 16))
+            self.team_card.pack(fill="x", padx=12, pady=(0, 12))
 
     def set_lang(self, value):
         lang = "fa" if un(value).startswith("فارسی") else "en"
@@ -3918,7 +3954,7 @@ class App(ctk.CTk):
     # ------------------------------------------------------------ friends
     def build_friends(self):
         self.pg_friends = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
-        self.panel_head(self.pg_friends, "Friends & Chat")
+        self.page_head(self.pg_friends, "Friends & Chat")
         cols = ctk.CTkFrame(self.pg_friends, fg_color="transparent")
         cols.pack(fill="both", expand=True, padx=16, pady=(10, 14))
         cols.grid_columnconfigure(0, minsize=340)   # the list column: a friend row is one line

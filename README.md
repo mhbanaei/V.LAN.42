@@ -116,7 +116,10 @@ Inside the app:
   password. The current one is asked for, so a seat left unlocked is not a way in; the
   new one has to be at least 6 characters, every other session of the account is dropped,
   and *remember me* carries on with the new password. For the team, one more card:
-  *Open the console*.
+  *Open the console*. The page scrolls, so no card is ever out of reach on a short window.
+
+The name of the app is drawn once, in the top bar; a page header only says where you are
+and thanks the people whose support pays for the servers - `reymit.ir/42level`, clickable.
 
 A room does not die with its host. When the owner leaves, ownership moves to the
 longest-serving admin and, if there is none, to any other member - so the room and its
