@@ -107,6 +107,10 @@ no room borrows another room's rules.
   somebody writes no ticks at all, for exactly that reason.
 * Kicked players can be let back in; banned players cannot join until unbanned. New
   members wait for the host (or an admin with `approve`) before they are inside.
+* The **Players** column leads with the ranks - owner at the top, then the admins, then
+  the members, each group in name order. The roster key that decides whether the column
+  is rebuilt carries every member's role, so the moment somebody is promoted or demoted
+  the column reorders itself on the next state the server sends.
 
 ### Invites
 

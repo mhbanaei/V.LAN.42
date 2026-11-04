@@ -1890,6 +1890,14 @@ def by_name(entry):
     return str(entry.get("name") or "").lower()
 
 
+def by_role(entry):
+    """The players column leads with the ranks: owner at the top, then the admins, then
+    everybody else, each group on its own names. A rank that is not one of the three sits
+    at the bottom rather than disappearing from the list."""
+    return ({"owner": 0, "admin": 1, "member": 2}.get(entry.get("role") or "member", 3),
+            by_name(entry))
+
+
 def rank_mark(role):
     return RANK_MARK.get(role or "member", "")
 
@@ -4048,7 +4056,10 @@ class App(ctk.CTk):
         self.rows = {}
         perms = self.my_perms()
         mine_id = self.link.user["id"] if (self.link and self.link.user) else None
-        for m in sorted(room.get("members", []), key=by_name):   # top to bottom, A to Z
+        # top to bottom by rank first - owner, admin, member - and by name inside a rank.
+        # The key below carries every member's role, so a rank that changes reorders the
+        # column on the very next word the server sends.
+        for m in sorted(room.get("members", []), key=by_role):
             pid = m["id"]
             mine = pid == mine_id
             role = m.get("role", "member")

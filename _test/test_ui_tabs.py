@@ -465,17 +465,32 @@ def main():
     #     the address of the network itself
     app.link = FakeLink()
     names = ["zed", "042", "milad", "aria"]
+    roles = ["member", "member", "admin", "owner"]
     n2 = FakeNode()
     n2.srv_rtt = 21
-    n2.room["members"] = [{"id": i + 10, "name": nm, "role": "member", "online": True,
-                           "vip": f"10.77.0.{i + 10}"} for i, nm in enumerate(names)]
+    n2.room["members"] = [{"id": i + 10, "name": nm, "role": rl, "online": True,
+                           "vip": f"10.77.0.{i + 10}"}
+                          for i, (nm, rl) in enumerate(zip(names, roles))]
     n2.room["invite"] = ""
     app.node, app.room_name = n2, "war room"
     app.role_key = None
     app.update_room(n2)
     seen = [str(row[1].cget("text")) for row in app.rows.values()]   # built in list order
-    check("players line up by name, top to bottom",
-          seen == sorted(names, key=str.lower), str(seen))
+    check("players lead with the ranks: owner, admin, member", seen == ["aria", "milad", "042", "zed"],
+          str(seen))
+    # a rank that changes reorders the column on the next word from the server
+    n2.room["members"][0]["role"] = "owner"      # zed takes the room over
+    n2.room["members"][3]["role"] = "member"     # and aria steps down
+    app.update_room(n2)
+    seen = [str(row[1].cget("text")) for row in app.rows.values()]
+    check("and the column follows a role that changed", seen == ["zed", "milad", "042", "aria"],
+          str(seen))
+    # inside one rank the names still read top to bottom, A to Z
+    n2.room["members"] = [{"id": 20 + i, "name": nm, "role": "member", "online": True,
+                           "vip": f"10.77.0.{20 + i}"} for i, nm in enumerate(names)]
+    app.update_room(n2)
+    seen = [str(row[1].cget("text")) for row in app.rows.values()]
+    check("inside a rank the names line up", seen == sorted(names, key=str.lower), str(seen))
     app.link.friends_payload = {"friends": [{"name": nm, "online": True} for nm in names],
                                 "requests": []}
     app.friends = {"friends": app.link.friends_payload["friends"], "requests": []}
