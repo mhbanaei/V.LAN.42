@@ -83,13 +83,14 @@ help                    this list
 ```
 
 Typed in the server's own window there is no password: whoever can type there owns the
-machine. Run over the network - which is what the app's panel does - the same commands
-only answer with a stamp made from `vlan42_staff.key`, that file lives on this server
-alone, and a stamp is worth one minute.
+machine. Over the network the same commands answer either to a stamp made from
+`vlan42_staff.key` - that file lives on this server alone, and a stamp is worth one minute -
+or to a connection already signed in as an account the team vouched for.
 
 The same facts as a table inside the app: **Settings → Open the console**, which appears
 only for an account the team vouched for. *Users / Rooms / Traffic*, a click on a column
-header to sort, a box to search, `Make team` / `Remove from team` on a user row, and each
+header to sort, a box to search, the rooms each account holds listed in its line,
+`Make team` / `Remove from team` on a user row, and each
 room's player ceiling typed in its own row. `set admin` opens that panel on the
 account's screen the moment you type it - no signing out and back in for them, and
 `remove admin` closes it the same way.
@@ -260,16 +261,17 @@ Run them one at a time - they share the config file and the test ports.
   "the network". Virtual room IPs (`10.77.0/16`) are left alone - those are the numbers
   players put into their game, and a click on a player line copies one to the clipboard
   and marks the line `Copied ✓`.
-* **The management door needs a key that is not in the app.** A player who has the whole
-  source code still has nothing: `do_admin` accepts a command only with a stamp made by a
-  process that can read `vlan42_staff.key` (AES-256-GCM over the minute it was minted,
-  AAD `vlan42-staff`), and that file lives on the VPS alone. The one way in that needs no
-  stamp is typing into the server's own window - that is the machine itself, so it is only
-  open to whoever holds the VPS. A connection that is also signed in as a player needs a
-  second thing - that username has to appear in the `staff` list the server keeps in its
-  *own* `vlan42_server.json`, which no client writes. A stamp
-  copied off the wire is worthless a minute later, `remove admin` closes the door on the
-  next sign-in, and every refusal says the same flat "this is not the management console".
+* **The management door has two keys, and a player holds neither.** A connection that is
+  signed in as an account the team vouched for is let in - which is how the panel inside the
+  app works, with no key file on that PC. Any other connection needs a stamp made by a
+  process able to read `vlan42_staff.key` (AES-256-GCM over the minute it was minted, AAD
+  `vlan42-staff`), and that file lives on the VPS alone; typing into the server's own window
+  needs nothing at all, because whoever is at that keyboard owns the machine. So a player
+  with the whole source code still cannot make themselves management: the `staff` list lives
+  in the server's *own* `vlan42_server.json`, which no client writes, `set admin` only runs
+  behind those two doors, a stamp copied off the wire is worthless a minute later, and every
+  refusal says the same flat "this is not the management console". Vouching or un-vouching
+  reaches the account on their screen the moment it is typed - no signing out and in.
 * **Three accounts to a PC, no more.** The app hashes what Windows and the BIOS say about
   the box (`machine_id()`: install GUID, board maker/product/serial, and WMI's UUID and CPU
   signature only if the registry had nothing) and sends only that hash. The server keeps it

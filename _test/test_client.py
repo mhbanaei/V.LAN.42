@@ -586,9 +586,9 @@ def main(srv):
     check("an old stamp has expired", not r.get("ok"), str(r))
     r = admin(a, "users", stamp=stamp_of(STAFF_KEY, 600))
     check("and a stamp from the future counts for nothing", not r.get("ok"), str(r))
-    r = admin(a, "set admin alice")
-    check("a real stamp from an account the team did not vouch is still refused",
-          not r.get("ok") and r.get("err") == "This account is not management", str(r))
+    r = admin(a, "status")
+    check("a stamp made on the machine the server runs on is enough on its own",
+          r.get("ok") and "accounts" in r.get("out", ""), str(r))
     r = admin(a, "users", stamp=stamp_of(STAFF_KEY)[:20])
     check("a stamp cut short does not parse", not r.get("ok"), str(r))
 
@@ -599,6 +599,8 @@ def main(srv):
     r = a.req("login", u="alice", p="pw123")
     check("the app is told this account is the team", r.get("ok") and r.get("staff") is True, str(r))
     r = admin(a, "users")
+    check("an account the team vouched needs no key file on its own PC",
+          admin(a, "users", stamp="").get("ok"), str(admin(a, "users", stamp="")))
     rows = r.get("rows") or []
     check("the team reads the user list", r.get("ok") and len(rows) >= 3, str(r)[:120])
     one = next((x for x in rows if x["name"] == "alice"), {})
@@ -608,6 +610,9 @@ def main(srv):
           and one["staff"] is True and one["online"] is True, str(one))
     check("and the moment it was made is a moment, not a code",
           isinstance(one.get("created"), float) and one["created"] > 0, str(one.get("created")))
+    check("and which rooms they hold, not only how many",
+          isinstance(one.get("room_ids"), list) and len(one["room_ids"]) == one["rooms"],
+          str(one.get("room_ids")))
     box_line = next((x for x in rows if x["name"] == "pc1"), {})
     check("a line from the box that was counted shows its PC",
           box_line.get("machine") == box[:12], str(box_line))
@@ -668,14 +673,14 @@ def main(srv):
     push = b.drain_push("staff", timeout=6)
     check("the signed-in account is told so, without signing in again",
           push is not None and push.get("on") is True, str(push))
-    r = admin(b, "users")
+    r = admin(b, "users", stamp="")     # their own PC, no key file on it - the name is the key
     check("and the panel opens for them straight away", r.get("ok"), str(r))
     out = type_at_window("remove admin bob", "not management any more")
     check("typing remove admin takes the right back", "not management any more" in out, out[-200:])
     push = b.drain_push("staff", timeout=6)
     check("and the door closes on their screen too",
           push is not None and push.get("on") is False, str(push))
-    check("with nothing more they can ask", not admin(b, "users").get("ok"))
+    check("with nothing more they can ask", not admin(b, "users", stamp="").get("ok"))
     check("help at the window prints the list",
           "set limit" in type_at_window("help", "set limit"))
     check("quit does not stop the server by accident",
@@ -689,7 +694,8 @@ def main(srv):
           rc == 0 and "not management any more" in out, out)
     check("the app learns it on the next sign-in",
           a.req("login", u="alice", p="pw123").get("staff") is False)
-    check("and the console door shuts behind it", not admin(a, "users").get("ok"))
+    check("and the console door shuts behind it", not admin(a, "users", stamp="").get("ok"))
+    check("while the server's own window still answers", admin(a, "status").get("ok"))
     cfg = json.load(open(os.path.join(HERE, "vlan42_server.json"), encoding="utf-8"))
     check("the vouch list lives only in the server's own file",
           cfg.get("staff") == [] and cfg.get("tcp_port") == PORT, str(cfg))

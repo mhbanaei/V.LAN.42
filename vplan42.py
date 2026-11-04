@@ -3417,7 +3417,7 @@ class App(ctk.CTk):
     # words above line up with the values below however long they are.
     CON_COLS = {
         "Users": (("name", "Name", 0), ("id", "ID", 46), ("last", "Last seen", 140),
-                  ("created", "Made", 140), ("machine", "PC", 120), ("rooms", "Rooms", 52),
+                  ("created", "Made", 140), ("machine", "PC", 120), ("rooms", "Rooms", 92),
                   ("online", "Online", 46), ("bytes", "Data", 80), ("staff", "Team", 40)),
         "Rooms": (("id", "ID", 46), ("name", "Room", 0), ("owner", "Owner", 150),
                   ("members", "Members", 70), ("online", "Online", 60), ("limit", "Limit", 74),
@@ -3595,6 +3595,10 @@ class App(ctk.CTk):
                     v = "●" if v else "○"
                 elif key == "staff":
                     v = "★" if v else "-"
+                elif key == "rooms":
+                    # the count sorts, the ids are what the team actually wants to see
+                    ids = r.get("room_ids") or []
+                    v = ", ".join(str(i) for i in ids) if ids else "-"
                 self.con_cell(row, str(v) if n_ == self.con_lead else
                               con_clip(str(v), self.con_cols[n_] - 12), n_)
             if edit:

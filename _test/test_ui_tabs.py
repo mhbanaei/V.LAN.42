@@ -688,6 +688,8 @@ def main():
     check("and an online one as online", "●" in labels(app.con_body))
     check("the volume is readable, not a byte count", "4.0KB" in labels(app.con_body),
           str(labels(app.con_body)))
+    check("and a user line names the rooms they hold", "5, 9" in labels(app.con_body),
+          str(labels(app.con_body)))
     check("every account can be moved into the team",
           len(find(app.con_body, ctk.CTkButton, "Make team")) == 2
           and len(find(app.con_body, ctk.CTkButton, "Remove from team")) == 1)

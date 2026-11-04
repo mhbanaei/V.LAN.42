@@ -865,14 +865,14 @@ class Server:
         return f"{name} was already {'management' if on else 'not management'}."
 
     def do_admin(self, c, m):
-        """The management console speaks here. The stamp is what says who: only a process
-        holding vlan42_staff.key can make one, so reading the source changes nothing.
-        An app that is also signed in as a player needs a second key: that account must be
-        one the team vouched for in the server's own config."""
-        if not staff_ok(m.get("stamp")):
+        """Two doors, each with its own key. A console running beside the server proves
+        itself with a stamp made from vlan42_staff.key, so a copy of the source code gets
+        nowhere. The app proves itself with the account it signed in as - and that name only
+        ever gets on the list by somebody typing `set admin` at the server itself. Either
+        key opens the same commands; a refusal never says which one was missing."""
+        vouched = bool(c.user) and c.user["username"].lower() in staff_users(self.cfg)
+        if not vouched and not staff_ok(m.get("stamp")):
             return {"t": "admin", "ok": False, "err": "This is not the management console"}
-        if c.user and c.user["username"].lower() not in staff_users(self.cfg):
-            return {"t": "admin", "ok": False, "err": "This account is not management"}
         return self.admin_cmd(m.get("cmd"))
 
     def admin_cmd(self, cmd):
