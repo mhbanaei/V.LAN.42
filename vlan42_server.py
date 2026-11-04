@@ -875,6 +875,25 @@ class Server:
             return {"t": "admin", "ok": False, "err": "This is not the management console"}
         return self.admin_cmd(m.get("cmd"))
 
+    def admin_drop_room(self, rid):
+        """The team deletes a room outright: nothing is handed to another member, the room
+        is simply gone. Whoever is inside is told so, and their own app lets go of it."""
+        for mrow in self.room_members(rid):
+            uid = mrow["user_id"]
+            c = self.conns.get(uid)
+            if c:
+                try:
+                    c.push({"t": "kicked", "room": rid, "user": uid, "by": "the team"})
+                except Exception:
+                    pass
+                if c.active_room == rid:
+                    c.active_room = None
+            self.udp_drop(uid)
+        for table in ("members", "bans", "jreq", "room_perms", "rooms"):
+            self.db.run(f"DELETE FROM {table} WHERE room_id=?" if table != "rooms"
+                        else "DELETE FROM rooms WHERE id=?", (rid,))
+        return f"Room {rid} is deleted - its members are told, nothing was handed over."
+
     def admin_cmd(self, cmd):
         """The commands themselves. The server's own window runs them at once - whoever can
         type at that keyboard owns the machine, and that is the whole credential."""
@@ -914,6 +933,26 @@ class Server:
             self.push_state(rid)
             return {"t": "admin", "ok": True,
                     "out": f"Room {rid} ({room['name']}) now takes {lim} players"}
+        if verb == "set room" and arg:
+            bits = arg.split(None, 1)
+            if len(bits) != 2 or not bits[0].isdigit():
+                return {"t": "admin", "ok": False, "err": "Use: set room <room id> <new name>"}
+            rid, name = int(bits[0]), bits[1].strip()
+            room = self.db.one("SELECT * FROM rooms WHERE id=?", (rid,))
+            if not room:
+                return {"t": "admin", "ok": False, "err": f"No room with id {rid}"}
+            if not (1 <= len(name) <= 32):
+                return {"t": "admin", "ok": False, "err": "A room name is 1-32 characters"}
+            self.db.run("UPDATE rooms SET name=? WHERE id=?", (name, rid))
+            self.push_state(rid)
+            return {"t": "admin", "ok": True, "out": f"Room {rid} is called '{name}' now"}
+        if verb == "remove room" and arg:
+            if not arg.isdigit():
+                return {"t": "admin", "ok": False, "err": "Use: remove room <room id>"}
+            rid = int(arg)
+            if not self.db.one("SELECT id FROM rooms WHERE id=?", (rid,)):
+                return {"t": "admin", "ok": False, "err": f"No room with id {rid}"}
+            return {"t": "admin", "ok": True, "out": self.admin_drop_room(rid)}
         return {"t": "admin", "ok": False, "err": "Unknown command"}
 
     def do_room_state(self, c, m):
@@ -1659,6 +1698,8 @@ Type them into the window that is running the server, or next to it:
   set admin <name>       let <name> see the management panel inside the app
   remove admin <name>    take that right back
   set limit <room> <n>   how many players room <room> may hold (2-64)
+  set room <room> <name> call room <room> something else
+  remove room <room>     delete the room - nobody inherits it
   help                   this list
 
 Nothing here needs a password: whoever can type in the server's window is whoever holds

@@ -689,6 +689,31 @@ def main(srv):
           "Unknown command" in type_at_window("launch rocket", "Unknown command"))
     check("and the server is still standing after all that typing", a.req("my_rooms").get("ok"))
 
+    # ---- the team renaming and deleting rooms
+    out = type_at_window(f"set room {rid} home team", "is called")
+    check("the window renames a room", f"is called 'home team'" in out, out[-200:])
+    check("and the new name is what the panel reads",
+          any(x["id"] == rid and x["name"] == "home team" for x in admin(a, "rooms").get("rows") or []),
+          str(admin(a, "rooms").get("rows")))
+    check("the players in that room see the name change",
+          b.drain_push("room_state", timeout=6) is not None)
+    check("a name longer than 32 is refused",
+          not admin(a, f"set room {rid} " + "z" * 40).get("ok"))
+    check("and a room that is not there", not admin(a, "set room 99999 nope").get("ok"))
+    check("so is a nameless rename", not admin(a, "set room").get("ok"))
+    out = type_at_window(f"remove room {rid}", "is deleted")
+    check("the window deletes a room outright", "is deleted" in out, out[-200:])
+    check("and it is gone from the panel",
+          not any(x["id"] == rid for x in admin(a, "rooms").get("rows") or []))
+    kick = b.drain_push("kicked", timeout=6)
+    check("the members are told, not left hanging",
+          kick is not None and kick.get("room") == rid and kick.get("by") == "the team", str(kick))
+    check("nobody inherits it", b.req("room_state", room=rid).get("ok") is not True,
+          str(b.req("room_state", room=rid)))
+    check("a second delete says it is already gone",
+          not admin(a, f"remove room {rid}").get("ok"))
+    check("and a room id that is not a number", not admin(a, "remove room abc").get("ok"))
+
     out, rc = console("remove", "admin", "alice")
     check("the server window takes the right back",
           rc == 0 and "not management any more" in out, out)

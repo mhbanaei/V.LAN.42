@@ -33,6 +33,7 @@ class FakeLink:
         self.user = {"id": 7, "username": "042"}
         self.friends_payload = {"friends": [], "requests": []}
         self.admin_rows = []          # what the management console is shown
+        self.rooms = []               # what my_rooms answers with
         self.admin_ok = True
         self.pw = None                # what the server answers to a password change
 
@@ -47,7 +48,7 @@ class FakeLink:
         if t == "change_password":
             return dict(self.pw or {"t": t, "ok": True, "token": "a-brand-new-token"})
         if t == "my_rooms":
-            return {"t": t, "ok": True, "rooms": []}
+            return {"t": t, "ok": True, "rooms": list(self.rooms)}
         if t == "search":
             return {"t": t, "ok": True, "users": [{"name": "sara"}]}
         if t == "pm":
@@ -69,11 +70,16 @@ class FakeLink:
 
 
 class FakeNode:
-    def __init__(self, rid=5, name="war room", role="owner"):
-        self.rid, self.vip, self.running = rid, "10.77.0.7", True
+    """A room engine that only remembers, so switching rooms can be watched without
+    touching Wintun, UDP or the server."""
+
+    def __init__(self, link=None, room=None, log=None, ev=None,
+                 rid=5, name="war room", role="owner"):
+        self.room = room or {"id": rid, "name": name, "my_role": role, "members": []}
+        self.rid, self.vip, self.running = self.room.get("id"), "10.77.0.7", True
         self.tx = self.rx = 0
-        self.room = {"id": rid, "name": name, "my_role": role, "members": []}
         self.peers = {}
+        self.started = self.stopped = False
 
     def my_role(self):
         return self.room["my_role"]
@@ -81,8 +87,20 @@ class FakeNode:
     def update_state(self, room):
         self.room = room
 
+    def start(self):
+        self.started = True
+
     def stop(self):
-        pass
+        self.stopped = True
+
+
+def flush(app, times=8):
+    """Let every worker answer land before the next click, the way tick() does."""
+    for _ in range(times):
+        time.sleep(0.03)
+        app.update_idletasks()
+        while not app.uq.empty():
+            app.on_event(app.uq.get_nowait())
 
 
 def labels(w):
@@ -490,6 +508,93 @@ def main():
     app.tick()
     check("log lines land in the page", "a line for the log" in app.logbox.get("1.0", "end"))
 
+    # 12b. switching rooms, and the notice line that waits for a host
+    room5 = {"id": 5, "name": "war room", "members": [], "my_role": "owner", "key": "00",
+             "code": "AAA", "pwd": "p", "invite": "x", "limit": 16}
+    room9 = {"id": 9, "name": "my room", "members": [], "my_role": "member", "key": "00",
+             "code": "BBB", "pwd": "p", "invite": "y", "limit": 16}
+    real_node, vp.VpsNode = vp.VpsNode, FakeNode
+    try:
+        app.on_my_rooms([room5, room9])
+        app.link.rooms = [room5, room9]
+        first = FakeNode(app.link, room5, lambda s: None, lambda e: None)
+        first.started = True
+        app.node, app.busy, app.tab, app.room_name = first, False, "room", "war room"
+        app.link.sent.clear()
+        app.enter_room(room9)
+        flush(app)
+        check("entering another room leaves the first one by itself", first.stopped, str(first.stopped))
+        check("and takes the new room without a second click",
+              bool(app.node) and app.node.rid == 9 and app.node.started,
+              str(app.node and (app.node.rid, app.node.started)))
+        app.tab = "start"
+        app.show_page("start")
+        app.update_start()
+        check("the row of the room you are in says Open, not Enter",
+              [str(r["enter"].cget("text")) for r in app.room_rows.values()] == ["Enter", "Open"],
+              str([str(r["enter"].cget("text")) for r in app.room_rows.values()]))
+        app.link.sent.clear()
+        for where in ("friends", "start", "logs", "friends"):
+            app.select_tab(where)
+        check("visiting other tabs never asks the server to drop the room",
+              app.node is not None and not any(t in ("deactivate", "logout")
+                                               for t, _ in app.link.sent), str(app.link.sent[-3:]))
+    finally:
+        app.node, app.busy = None, False
+        app.link.rooms = []
+        vp.VpsNode = real_node
+        app.show_page("start")
+
+    app.on_event({"t": "join_pending", "name": "home", "msg": ""})
+    check("the waiting line is shown while a host decides",
+          app.hint.winfo_manager() == "pack" and app.hint_kind == "join", str(app.hint_kind))
+    app.on_event({"t": "join_ok", "room": 9, "by": "sara", "name": "home"})
+    check("and it goes away the moment the host lets you in",
+          app.hint.winfo_manager() == "" and app.await_enter == 9, str(app.await_enter))
+    app.on_event({"t": "join_pending", "name": "home", "msg": ""})
+    app.on_event({"t": "join_no", "by": "sara"})
+    check("a refusal takes the line away too", app.hint.winfo_manager() == "")
+    app.await_enter = None
+
+    # 12c. the columns: a chat that waits to be opened, and lines that can be dragged
+    app.sel_friend = None
+    app.select_tab("friends")
+    check("no chat box before a friend is picked",
+          app.fr_right.winfo_manager() == "" and app.fr_split.winfo_manager() == "",
+          f"{app.fr_right.winfo_manager()} / {app.fr_split.winfo_manager()}")
+    app.open_pm("sara")
+    app.update_idletasks()
+    check("picking a friend opens the chat and the line beside it",
+          app.fr_right.winfo_manager() == "grid" and app.fr_split.winfo_manager() == "grid",
+          str(app.fr_right.winfo_manager()))
+    app.fr_split.apply(520)
+    check("the drag line widens the list, so a long name is read whole",
+          app.fr_w == 520 and app.fr_cols.grid_columnconfigure(0)["minsize"] == 520,
+          str(app.fr_cols.grid_columnconfigure(0)["minsize"]))
+    app.close_pm()
+    check("closing the chat gives the whole page back to the list",
+          app.fr_right.winfo_manager() == "" and app.fr_cols.grid_columnconfigure(0)["weight"] == 1,
+          str(app.fr_cols.grid_columnconfigure(0)))
+
+    app.set_room_w(460)
+    check("the room page has the same drag line for its players column",
+          app.room_left.cget("width") == 460 and app.room_split.winfo_manager() == "pack",
+          str(app.room_left.cget("width")))
+    slaves = app.room_left.pack_slaves()
+    check("and its buttons are put down before the list can squeeze them out of sight",
+          app.room_act.pack_info()["side"] == "bottom"
+          and slaves.index(app.room_act) < slaves.index(app.room_pc),
+          str([type(s).__name__ for s in slaves]))
+    check("the room chat takes Ctrl+C and Ctrl+V like any other box",
+          "<Control-Key>" in str(app.chatbox._textbox.bind("")),
+          str(app.chatbox._textbox.bind())[:70])
+    check("the friends chat does too",
+          "<Control-Key>" in str(app.pm_box._textbox.bind("")))
+    check("so does a friend's message line",
+          "<Control-Key>" in str(app.pm_in._textbox.bind("")))
+    check("and so does the room's own message line",
+          "<Control-Key>" in str(app.chat_in._textbox.bind("")))
+
     # 13. every floating panel is branded
     top = ctk.CTkToplevel(app)
     top.withdraw()
@@ -666,14 +771,6 @@ def main():
     def rows(app):
         return [c for c in app.con_body.winfo_children() if isinstance(c, ctk.CTkFrame)]
 
-    def flush(app, times=8):
-        """Let every worker answer land before the next click, the way tick() does."""
-        for _ in range(times):
-            time.sleep(0.03)
-            app.update_idletasks()
-            while not app.uq.empty():
-                app.on_event(app.uq.get_nowait())
-
     NAMES3 = {"sara", "milad", "negar"}
     USERS = [{"id": 11, "name": "sara", "created": 1700000000.0, "last": 1700000600.0,
               "machine": "0123456789ab", "rooms": 2, "online": True, "bytes": 4096,
@@ -751,28 +848,49 @@ def main():
     app.set_admin_view("Rooms")
     flush(app)
     app.console_sort("id")
+    def boxes(row):
+        """The two typed cells of a room line: its name and how many players it may hold."""
+        return find(row, ctk.CTkEntry)
+
     check("the room list is on the same table",
-          app.con_view == "Rooms" and "war room" in labels(app.con_body), str(labels(app.con_body)))
-    check("every room carries its own ceiling",
-          len(find(app.con_body, ctk.CTkEntry)) == len(ROOMS), str(len(find(app.con_body, ctk.CTkEntry))))
-    box = lambda: find(app.con_body, ctk.CTkEntry)[0]
-    check("the ceiling is typed in the row", box().get() == "16", box().get())
-    box().delete(0, "end")
-    box().insert(0, "7")
+          app.con_view == "Rooms" and boxes(rows(app)[0])[0].get() == "war room",
+          str(labels(app.con_body)))
+    check("a room line carries a name box and a ceiling box",
+          len(find(app.con_body, ctk.CTkEntry)) == 2 * len(ROOMS),
+          str(len(find(app.con_body, ctk.CTkEntry))))
+    nm0, lim0 = boxes(rows(app)[0])
+    check("and both are typed in the row itself", (nm0.get(), lim0.get()) == ("war room", "16"),
+          str((nm0.get(), lim0.get())))
+    sent_before = len(app.link.sent)
+    lim0.delete(0, "end")
+    lim0.insert(0, "7")
+    nm0.delete(0, "end")
+    nm0.insert(0, "home team")
     find(rows(app)[0], ctk.CTkButton, "Save")[0].invoke()
     flush(app)
-    check("saving sends the new ceiling",
-          any(t == "admin" and kw.get("cmd") == "set limit 5 7" for t, kw in app.link.sent),
-          str(app.link.sent[-2:]))
+    cmds = [kw.get("cmd") for t, kw in app.link.sent[sent_before:] if t == "admin"]
+    check("saving renames the room and retunes its ceiling in one go",
+          "set room 5 home team" in cmds and "set limit 5 7" in cmds, str(cmds))
     sent_before = len(app.link.sent)
-    box().delete(0, "end")
-    box().insert(0, "nope")
+    boxes(rows(app)[0])[1].delete(0, "end")
+    boxes(rows(app)[0])[1].insert(0, "nope")
     find(rows(app)[0], ctk.CTkButton, "Save")[0].invoke()
     flush(app)
     check("a number that is not one is stopped at the door",
           len(app.link.sent) == sent_before and app.hint.winfo_manager() == "pack"
           and "2 to 64" in " ".join(labels(app.hint)), str(labels(app.hint)))
     app.hide_hint()
+    sent_before = len(app.link.sent)
+    d = find(rows(app)[0], ctk.CTkButton, "Delete")[0]
+    d.invoke()
+    check("deleting a room asks first instead of just doing it",
+          str(d.cget("text")) == "Sure?" and len(app.link.sent) == sent_before,
+          str(d.cget("text")))
+    d.invoke()
+    flush(app)
+    check("and only the second click says so to the server",
+          any(t == "admin" and kw.get("cmd") == "remove room 5" for t, kw in app.link.sent),
+          str(app.link.sent[-2:]))
 
     app.link.admin_rows = TRAFFIC
     app.set_admin_view("Traffic")

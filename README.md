@@ -79,6 +79,8 @@ traffic                 bytes the relay moved, per player per day
 set admin <name>        let that account open the panel inside the app
 remove admin <name>     take that right back
 set limit <room> <n>    how many players a room may hold (2-64)
+set room <room> <name>  give a room another name
+remove room <room>      delete a room - nobody inherits it
 help                    this list
 ```
 
@@ -90,8 +92,9 @@ or to a connection already signed in as an account the team vouched for.
 The same facts as a table inside the app: **Settings → Open the console**, which appears
 only for an account the team vouched for. *Users / Rooms / Traffic*, a click on a column
 header to sort, a box to search, the rooms each account holds listed in its line,
-`Make team` / `Remove from team` on a user row, and each
-room's player ceiling typed in its own row. `set admin` opens that panel on the
+`Make team` / `Remove from team` on a user row, and on a room row its **name and ceiling
+typed in the row** with *Save*, plus *Delete* - which asks "Sure?" first and only deletes
+on the second click. `set admin` opens that panel on the
 account's screen the moment you type it - no signing out and back in for them, and
 `remove admin` closes it the same way.
 
@@ -107,13 +110,21 @@ Inside the app:
 * **Rooms** - the rooms you host or belong to, with a crown on the one you own. Up to
   **3 rooms per account**. Create a room by typing its name and pressing the dice for the
   password; the password is 32 characters from the operating system's entropy pool.
+  Entering another room leaves the one you are in by itself - no *Leave room* first - and
+  the room you already stand in shows **Open** instead of *Enter*, so a click there just
+  takes you to its page.
 * **Friends** - search by username, send a request, accept or ignore, open a private
   thread. A request or a message updates both sides the moment it lands, and a friend's
   words are heard as well: the message sound is `text.mp3` next to the app (bundled in the
-  exe), and Settings → *Message sound* turns it off - off really means silence.
+  exe), and Settings → *Message sound* turns it off - off really means silence. Until you
+  pick someone, the page is only the list; the chat column - and the drag line beside it -
+  appear when a friend is chosen and go away with *Close chat*.
 * **Room** - appears in the tab bar only while you are inside one. One clean card per
   player: status dot, name, their ping, and clicking the card copies their virtual IP.
-  The room stays attached to the server even when you are the only one inside.
+  The room stays attached to the server even when you are the only one inside, and it
+  stays attached while you visit the other tabs - only *Leave room* or entering a
+  different room lets it go. The buttons are pinned to the bottom of the column, so a
+  short window shrinks the player list instead of swallowing them.
 * **Logs** - everything the app has to say. Nothing is written to a `.log` file.
 * **Settings** - English / فارسی, the message sound, and a card to change your own
   password. The current one is asked for, so a seat left unlocked is not a way in; the
@@ -128,7 +139,14 @@ Nothing pops up over the window. A notice - a friend request, a message while yo
 another page, a guest knocking, an invite waiting on the host - is one thin line directly
 under the tab bar, on the side the language is read from, with its own buttons when there
 is something to answer. The tab it belongs to keeps its red number, so the news is still
-there after the line fades.
+there after the line fades, and a line that was waiting on something goes the moment that
+thing is answered - being let in, or turned away, retires *Waiting for the host*.
+
+Two columns that share a page - the friends list and its chat, the players and the room
+chat - are split by a thin line you can drag, so a long username is read whole instead of
+being cut off; the width is remembered while the app is open. Every box you can type in,
+and every chat log you read, answers `Ctrl+C`, `Ctrl+V`, `Ctrl+X` and `Ctrl+A`, and a
+right-click offers the same four as a menu.
 
 A room does not die with its host. When the owner leaves, ownership moves to the
 longest-serving admin and, if there is none, to any other member - so the room and its

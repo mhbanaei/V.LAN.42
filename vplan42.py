@@ -1396,6 +1396,10 @@ TR = {
     "On": "روشن",
     "Off": "خاموش",
     "Test sound": "آزمایش صدا",
+    "inside '{room}' - the room stays connected":
+        "داخل «{room}» هستید - اتصال اتاق برقرار است",
+    "Leaving {old} for {new}": "از {old} بیرون می‌رویم تا {new} باز شود",
+    "Open": "باز کردن",
     "Language: {which}": "زبان: {which}",
     # ------------------------------------------------- in-app notices
     "Friend request": "درخواست دوستی",
@@ -1511,6 +1515,10 @@ TR = {
     "Management access for this account changed": "دسترسی مدیریت این حساب تغییر کرد",
     "The server refused that.": "سرور این کار را نپذیرفت.",
     "Use a whole number from 2 to 64": "یک عدد صحیح بین ۲ تا ۶۴ بنویسید.",
+    "A room name is 1-32 characters": "نام اتاق باید ۱ تا ۳۲ نویسه باشد.",
+    "Delete": "حذف",
+    "Sure?": "مطمئنید؟",
+    "Close chat": "بستن گفتگو",
 }
 # a segmented button hands back whatever it shows, so the handlers need the way home
 UNTR = {v: k for k, v in reversed(list(TR.items()))}
@@ -2050,6 +2058,29 @@ class TextLine(ctk.CTkTextbox):
             self.show_ph()
 
 
+class Splitter(ctk.CTkFrame):
+    """A thin draggable line between two columns. Drag it and the column it follows takes
+    that width - so a long username is read whole instead of being cut off, and nothing
+    has to be guessed at or re-typed."""
+
+    def __init__(self, master, apply, lo=200, hi=760):
+        super().__init__(master, fg_color=LINE, corner_radius=3, width=8,
+                         cursor="sb_h_double_arrow")
+        self.apply, self.lo, self.hi = apply, lo, hi
+        self.bind("<B1-Motion>", self.move)
+        self.bind("<Enter>", lambda e: self.configure(fg_color=ACC))
+        self.bind("<Leave>", lambda e: self.configure(fg_color=LINE))
+
+    def move(self, e):
+        box = self.master
+        scale = max(0.5, getattr(self, "_widget_scaling", 1.0) or 1.0)
+        if LANG[0] == "fa":     # the column grows from the right, so the ruler starts there
+            w = box.winfo_rootx() + box.winfo_width() - e.x_root
+        else:
+            w = e.x_root - box.winfo_rootx()
+        self.apply(max(self.lo, min(self.hi, int(w / scale))))
+
+
 ROLE_BADGE = {"owner": ("👑 Owner", GOLD), "admin": ("🛡 Admin", BLUE), "member": ("Member", MUTED)}
 # the word that trails a name wherever the roster or a chat line shows it
 RANK_MARK = {"owner": "(owner)", "admin": "(admin)"}
@@ -2158,7 +2189,7 @@ class App(ctk.CTk):
         self.jwin = None                # join-request panel
         self.jreq, self.jreq_n = [], 0  # who knocked on the room door
         self.await_enter = None         # room id we are waiting to be let into
-        self.hint_live, self.hint_t = False, 0     # the one notice line above the page
+        self.hint_live, self.hint_t, self.hint_kind = False, 0, None   # the notice line
         self.rooms_t = 0.0
         self.entering_rid = None
         self.tab = None                  # the tab the player opened
@@ -2399,9 +2430,11 @@ class App(ctk.CTk):
         self.hint_inner.pack(fill="both", expand=True, padx=16, pady=5)
         self.hint.pack_forget()
 
-    def notify(self, title, text, actions=None, keep=14):
+    def notify(self, title, text, actions=None, keep=14, kind=None):
         """actions is a list of (label, command, color); the buttons answer from wherever
-        you are and then the line steps back out of the way."""
+        you are and then the line steps back out of the way. kind says what the line is
+        about, so the event that answers it can take the line away - a notice must not
+        outlive the thing it was waiting for."""
         if not self.winfo_exists():
             return
         for c in self.hint_inner.winfo_children():
@@ -2413,6 +2446,7 @@ class App(ctk.CTk):
                      text_color=ACC).pack(side="left")
         Label(self.hint_inner, text=text, font=(FONT, 12), text_color=TXT).pack(
             side="left", padx=(9, 0))
+        self.hint_kind = kind
         self.hint_t = keep
         self.show_hint()
         self.beep()
@@ -2425,9 +2459,14 @@ class App(ctk.CTk):
             self.after(1000, self.tick_hint)
 
     def hide_hint(self):
-        self.hint_live, self.hint_t = False, 0
+        self.hint_live, self.hint_t, self.hint_kind = False, 0, None
         if self.hint.winfo_manager() == "pack":
             self.hint.pack_forget()
+
+    def clear_hint(self, *kinds):
+        """Take the line away when the news it carried has just been answered."""
+        if self.hint_kind in kinds:
+            self.hide_hint()
 
     def tick_hint(self):
         if not self.hint_live:
@@ -2716,8 +2755,9 @@ class App(ctk.CTk):
     # ------------------------------------------------------------ room page
     def build_room(self):
         self.pg_room = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
-        left = ctk.CTkFrame(self.pg_room, fg_color="transparent", width=380)
-        left.pack(side="left", fill="y", padx=(16, 8), pady=16)
+        self.room_w = 380             # the players column, until somebody drags the line
+        left = self.room_left = ctk.CTkFrame(self.pg_room, fg_color="transparent", width=self.room_w)
+        left.pack(side="left", fill="y", padx=(16, 0), pady=16)
         left.pack_propagate(False)
 
         hc = ctk.CTkFrame(left, fg_color=CARD, corner_radius=14, border_width=1, border_color=LINE)
@@ -2736,19 +2776,10 @@ class App(ctk.CTk):
         self.lbl_stats = Label(hc, text="", font=("Consolas", 11), text_color=MUTED, anchor="w")
         self.lbl_stats.pack(fill="x", padx=16, pady=(0, 12))
 
-        pc = ctk.CTkFrame(left, fg_color=CARD, corner_radius=14, border_width=1, border_color=LINE)
-        pc.pack(fill="both", expand=True, pady=10)
-        ph = ctk.CTkFrame(pc, fg_color="transparent")
-        ph.pack(fill="x", padx=16, pady=(12, 0))
-        Label(ph, text="Players", font=(FONT, 14, "bold")).pack(side="left")
-        self.lbl_count = Label(ph, text="0 online", font=(FONT, 12), text_color=MUTED)
-        self.lbl_count.pack(side="right")
-        self.plist = ctk.CTkScrollableFrame(pc, fg_color="transparent")
-        self.plist.pack(fill="both", expand=True, padx=6, pady=(6, 8))
-        self.empty = Label(self.plist, text="", font=(FONT, 13), text_color=MUTED, justify="center")
-
-        act = ctk.CTkFrame(left, fg_color="transparent")
-        act.pack(fill="x")
+        # the buttons are put down first, against the bottom edge: whatever height the
+        # window is given, they are never the thing that gets squeezed out of sight
+        act = self.room_act = ctk.CTkFrame(left, fg_color="transparent")
+        act.pack(side="bottom", fill="x")
         self.row_host = ctk.CTkFrame(act, fg_color="transparent")
         self.b_inv = self.btn(self.row_host, "Copy invite code", self.copy_invite, CARD2, LINE, h=36)
         self.b_inv.pack(fill="x")
@@ -2760,11 +2791,27 @@ class App(ctk.CTk):
             side="left", expand=True, fill="x", padx=(0, 4))
         self.btn(act, "Leave room", self.leave, "#c0392b", "#a93226", h=40).pack(fill="x")
 
+        pc = self.room_pc = ctk.CTkFrame(left, fg_color=CARD, corner_radius=14,
+                                         border_width=1, border_color=LINE)
+        pc.pack(fill="both", expand=True, pady=10)
+        ph = ctk.CTkFrame(pc, fg_color="transparent")
+        ph.pack(fill="x", padx=16, pady=(12, 0))
+        Label(ph, text="Players", font=(FONT, 14, "bold")).pack(side="left")
+        self.lbl_count = Label(ph, text="0 online", font=(FONT, 12), text_color=MUTED)
+        self.lbl_count.pack(side="right")
+        self.plist = ctk.CTkScrollableFrame(pc, fg_color="transparent")
+        self.plist.pack(fill="both", expand=True, padx=6, pady=(6, 8))
+        self.empty = Label(self.plist, text="", font=(FONT, 13), text_color=MUTED, justify="center")
+
+        self.room_split = Splitter(self.pg_room, self.set_room_w, lo=300, hi=560)
+        self.room_split.pack(side="left", fill="y", padx=(0, 8))
+
         right = ctk.CTkFrame(self.pg_room, fg_color=CARD, corner_radius=14, border_width=1, border_color=LINE)
-        right.pack(side="left", fill="both", expand=True, padx=(8, 16), pady=16)
+        right.pack(side="left", fill="both", expand=True, padx=(0, 16), pady=16)
         Label(right, text="Chat", font=(FONT, 14, "bold"), anchor="w").pack(fill="x", padx=18, pady=(14, 6))
         self.chatbox = ctk.CTkTextbox(right, font=(FONT, 13), wrap="word", fg_color=BG, text_color=TXT,
                                       corner_radius=10, border_width=1, border_color=LINE)
+        fix_clipboard(self.chatbox)
         self.chatbox.pack(fill="both", expand=True, padx=14)
         for tag, kw in (("me", {"foreground": ACC}), ("them", {"foreground": "#5dade2"}),
                         ("sys", {"foreground": GRAY}), ("body", {"foreground": TXT}),
@@ -2780,6 +2827,13 @@ class App(ctk.CTk):
                                 on_type=lambda: self.note_typing())
         self.chat_in.pack(side="left", fill="x", expand=True)
         self.btn(crow, "Send", self.send_chat, h=40, width=80).pack(side="left", padx=(8, 0))
+
+    def set_room_w(self, w=None):
+        """The width of the players column, set by the drag line beside it. The room name
+        and a long player name are both read whole this way, at any window size."""
+        self.room_w = int(w or self.room_w)
+        self.room_left.configure(width=self.room_w)
+        self.lbl_room.configure(wraplength=max(160, self.room_w - 40))
 
     def build_logs(self):
         self.pg_logs = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
@@ -3325,10 +3379,30 @@ class App(ctk.CTk):
     def enter_room(self, room):
         if not room or not self.link:
             return
-        if self.busy or self.node:
+        if self.inside(room):
+            self.select_tab("room")
+            return
+        if self.node:
+            old = self.node
+            self.node, self.busy, self.room_name = None, True, room["name"]
+            self.q_put(fmt("Leaving {old} for {new}", old=old.room.get("name", "?"),
+                           new=room["name"]))
+            self.clear_hint("join")
+
+            def switch():
+                try:
+                    old.stop()          # the old room's cable is unplugged first...
+                except Exception:
+                    pass
+                self.busy = False
+                self.uq.put({"t": "enter_room", "room": room})   # ...then the new one is taken
+            threading.Thread(target=switch, daemon=True).start()
+            return
+        if self.busy:
             self.q_put("Still finishing the previous room - one moment.")
             return
         self.err = ""
+        self.clear_hint("join")         # entering any room ends the waiting for this one
         node = VpsNode(self.link, room, self.q_put, self.uq.put)
         node.chat_cb = lambda nm, tx, ts: self.cq.put((nm, tx, ts))
         self.room_name, self.role_key = room["name"], None
@@ -3361,6 +3435,7 @@ class App(ctk.CTk):
     def leave(self):
         if self.busy or not self.node:
             return
+        self.clear_hint("join")
         node, self.node, self.busy = self.node, None, True
         self.role_key = None
         if self.tab in (None, "room"):     # whoever left from Friends or Logs stays there
@@ -3434,7 +3509,7 @@ class App(ctk.CTk):
                   ("created", "Made", 140)),
         "Traffic": (("name", "Name", 0), ("day", "Day", 140), ("bytes", "Data", 80)),
     }
-    CON_ACT = {"Users": (142,), "Rooms": (68, 96), "Traffic": ()}
+    CON_ACT = {"Users": (142,), "Rooms": (96, 92), "Traffic": ()}
 
     def admin(self, cmd):
         """One line to the server's management commands, over the same encrypted channel.
@@ -3586,15 +3661,24 @@ class App(ctk.CTk):
                                corner_radius=10, border_width=1, border_color=LINE)
             row.pack(fill="x", pady=2)
             self.console_shape(row)
-            lim = None
+            lim = nm = None
             for n_, (key, label, px) in enumerate(cols):
                 v = r.get(key)
+                if key == "name" and self.con_view == "Rooms" and edit:
+                    # the team may also give a room another name, in the row it sits in
+                    nm = ctk.CTkEntry(row, height=26, font=(FONT, 12), fg_color=BG,
+                                      border_color=LINE, text_color=TXT)
+                    nm.grid(row=0, column=n_, sticky="nsew", padx=6, pady=4)
+                    fix_clipboard(nm)
+                    nm.insert(0, str(v))
+                    continue
                 if key == "limit" and edit:
                     # the team can retune how many players a room holds, right in the row
                     lim = ctk.CTkEntry(row, height=26, width=56, font=(FONT, 12),
                                        justify="center", fg_color=BG, border_color=LINE,
                                        text_color=TXT)
                     lim.grid(row=0, column=n_, sticky="ns", padx=6, pady=4)
+                    fix_clipboard(lim)
                     lim.insert(0, str(v))
                     continue
                 if key in ("created", "last"):
@@ -3608,7 +3692,7 @@ class App(ctk.CTk):
                 elif key == "rooms":
                     # the count sorts, the ids are what the team actually wants to see
                     ids = r.get("room_ids") or []
-                    v = ", ".join(str(i) for i in ids) if ids else "-"
+                    v = ", ".join(str(x) for x in ids) if ids else "-"
                 self.con_cell(row, str(v) if n_ == self.con_lead else
                               con_clip(str(v), self.con_cols[n_] - 12), n_)
             if edit:
@@ -3618,25 +3702,56 @@ class App(ctk.CTk):
                              self.set_team(who, on), CARD2, LINE, h=26, width=130
                              ).grid(row=0, column=len(cols), padx=6, pady=4)
                 else:
-                    self.btn(row, "Save", lambda rid=r.get("id"), e=lim:
-                             self.set_limit(rid, e.get()), ACC, ACC_H, h=26, width=84
-                             ).grid(row=0, column=len(cols) + 1, padx=(0, 6), pady=4)
+                    save = self.btn(row, "Save", None, ACC, ACC_H, h=26, width=84)
+                    save.configure(command=lambda rid=r.get("id"), n=nm, e=lim:
+                                    self.save_room(rid, n.get() if n else "",
+                                                   e.get() if e else ""))
+                    save.grid(row=0, column=len(cols), padx=(0, 6), pady=4)
+                    dele = self.btn(row, "Delete", None, "#c0392b", "#a93226", h=26, width=84)
+                    dele.configure(command=lambda rid=r.get("id"), b=dele: self.drop_room(rid, b))
+                    dele.grid(row=0, column=len(cols) + 1, padx=(0, 6), pady=4)
 
     def set_team(self, who, on):
         """Move one account in or out of the team. The server only ever listens when the
         stamp came from the key file, so this is a door only the team's own PC can open."""
         self.send_admin(("set admin " if on else "remove admin ") + who)
 
-    def set_limit(self, rid, value):
-        """How many players a room may hold - typed in the row, checked here and again there."""
-        if not str(value).isdigit() or not (2 <= int(value) <= 64):
+    def save_room(self, rid, name, limit):
+        """A room's name and its ceiling, typed in the row and checked here and again there."""
+        name = (name or "").strip()
+        if not (1 <= len(name) <= 32):
+            return self.notify("Management", T("A room name is 1-32 characters"))
+        if not str(limit).isdigit() or not (2 <= int(limit) <= 64):
             return self.notify("Management", T("Use a whole number from 2 to 64"))
-        self.send_admin(f"set limit {rid} {value}")
+        self.send_admins([f"set room {rid} {name}", f"set limit {rid} {limit}"])
+
+    def drop_room(self, rid, b):
+        """Deleting a room is not one click: the button asks first, and forgets the question
+        after a few seconds so an old click cannot delete anything by accident."""
+        if b.__dict__.get("armed", 0) > time.time():
+            b.__dict__["armed"] = 0
+            return self.send_admin(f"remove room {rid}")
+        b.__dict__["armed"] = time.time() + 5
+        setw(b, text="Sure?")
+        self.after(5200, lambda w=b: self.disarm(w))
+
+    def disarm(self, b):
+        if b.winfo_exists() and b.__dict__.get("armed", 0) <= time.time():
+            setw(b, text="Delete")
 
     def send_admin(self, cmd):
         def work():
             r = self.admin(cmd)
             self.uq.put({"t": "con_done", "r": r})
+        threading.Thread(target=work, daemon=True).start()
+
+    def send_admins(self, cmds):
+        """A few commands in one go, and the table reloads once - a row that saves a name
+        and a ceiling must not flicker twice."""
+        def work():
+            out = [self.admin(c) for c in cmds]
+            self.uq.put({"t": "con_done", "r": next((r for r in out if not r.get("ok")),
+                                                    {"t": "admin", "ok": True})})
         threading.Thread(target=work, daemon=True).start()
 
     def console_answer(self, r):
@@ -3787,6 +3902,7 @@ class App(ctk.CTk):
             row.pack(fill="x", padx=14, pady=12)
             Label(row, text="Member limit:", font=(FONT, 13)).pack(side="left")
             lim = ctk.CTkEntry(row, width=70, height=32, fg_color=CARD2, border_color=LINE)
+            fix_clipboard(lim)
             lim.insert(0, str(room.get("limit") or 16))
             lim.pack(side="left", padx=8)
 
@@ -3969,14 +4085,14 @@ class App(ctk.CTk):
     def build_friends(self):
         self.pg_friends = ctk.CTkFrame(self.body, fg_color=BG, corner_radius=0)
         self.page_head(self.pg_friends, "Friends & Chat")
-        cols = ctk.CTkFrame(self.pg_friends, fg_color="transparent")
+        cols = self.fr_cols = ctk.CTkFrame(self.pg_friends, fg_color="transparent")
         cols.pack(fill="both", expand=True, padx=16, pady=(10, 14))
-        cols.grid_columnconfigure(0, minsize=340)   # the list column: a friend row is one line
-        cols.grid_columnconfigure(1, weight=1)
+        self.fr_w = 340             # the list column, until somebody drags the line
         cols.grid_rowconfigure(0, weight=1)
+        self.fr_pm_on = False
 
         left = ctk.CTkFrame(cols, fg_color=CARD, corner_radius=14, border_width=1, border_color=LINE)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left.grid(row=0, column=0, sticky="nsew")
         li = ctk.CTkFrame(left, fg_color="transparent")
         li.pack(fill="both", expand=True, padx=12, pady=12)
         sr = ctk.CTkFrame(li, fg_color="transparent")
@@ -3990,10 +4106,14 @@ class App(ctk.CTk):
         self.fr_body = ctk.CTkScrollableFrame(li, fg_color="transparent")
         self.fr_body.pack(fill="both", expand=True, pady=(4, 0))
 
-        right = ctk.CTkFrame(cols, fg_color=CARD, corner_radius=14, border_width=1, border_color=LINE)
-        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        # the line between the list and the chat, and the chat itself, only appear once
+        # a friend has been picked - until then the list owns the whole page
+        self.fr_split = Splitter(cols, self.set_fr_w, lo=240, hi=620)
+        right = self.fr_right = ctk.CTkFrame(cols, fg_color=CARD, corner_radius=14,
+                                             border_width=1, border_color=LINE)
         hh = ctk.CTkFrame(right, fg_color="transparent")
         hh.pack(fill="x", padx=16, pady=(12, 4))
+        self.btn(hh, "Close chat", self.close_pm, CARD2, LINE, h=28, width=104).pack(side="right")
         self.pm_title = Label(hh, text="No chat open", font=(FONT, 15, "bold"))
         self.pm_title.pack(side="left")
         self.pm_state = Label(hh, text="", font=(FONT, 12), text_color=MUTED)
@@ -4127,9 +4247,37 @@ class App(ctk.CTk):
                      text_color="#ffffff", fg_color=RED, corner_radius=9, width=22, height=20)
 
     # ------------------------------------------------------------ friend to friend chat
+    def pm_panel(self, on):
+        """Show or hide the chat column and the line that splits it off the list. With no
+        friend picked, the list is the page."""
+        self.fr_pm_on = bool(on)
+        if on:
+            self.fr_split.grid(row=0, column=1, sticky="ns")
+            self.fr_right.grid(row=0, column=2, sticky="nsew")
+        else:
+            self.fr_split.grid_forget()
+            self.fr_right.grid_forget()
+        self.set_fr_w(self.fr_w)
+
+    def set_fr_w(self, w=None):
+        """The list column's width - typed by the drag, kept for the next time the chat opens."""
+        self.fr_w = int(w or self.fr_w)
+        cols, on = self.fr_cols, self.fr_pm_on
+        cols.grid_columnconfigure(0, minsize=self.fr_w if on else 0, weight=0 if on else 1)
+        cols.grid_columnconfigure(1, minsize=8 if on else 0, weight=0)
+        cols.grid_columnconfigure(2, minsize=280 if on else 0, weight=1 if on else 0)
+
+    def close_pm(self):
+        self.sel_friend = None
+        self.pm_panel(False)
+        self.pm_show()
+        self.rebuild_friends()
+        self.update_badges()
+
     def open_pm(self, name):
         self.sel_friend = name
         self.pm_unread.pop(name, None)
+        self.pm_panel(True)
         self.rebuild_friends()
         self.pm_show()
 
@@ -4140,10 +4288,12 @@ class App(ctk.CTk):
         self.pm_box.configure(state="normal")
         self.pm_box.delete("1.0", "end")
         if not name:
+            self.pm_panel(False)        # nobody picked: the list owns the page
             setw(self.pm_title, text="No chat open")
             setw(self.pm_state, text="pick a friend on the left")
             self.pm_box.configure(state="disabled")
             return
+        self.pm_panel(True)             # a friend is picked: the chat column is on the page
         if self.page == "friends":
             self.pm_unread.pop(name, None)      # looking at it now, so it is not waiting anymore
         f = next((x for x in self.friends.get("friends", []) if x["name"] == name), None)
@@ -4497,13 +4647,15 @@ class App(ctk.CTk):
         elif t == "join_pending":
             self.q_put(ev.get("msg") or "The host must approve you before you can enter")
             self.notify("Join request", fmt("Waiting for the host of {room}", room=ev.get("name") or ""),
-                        keep=30)
+                        keep=30, kind="join")
         elif t == "join_ok":
+            self.clear_hint("join")           # the answer is here: the waiting line is done
             self.q_put(fmt("{who} let you into {room}", who=ev.get("by", "?"),
                            room=ev.get("name", "")))
             self.await_enter = ev.get("room")
             self.refresh_rooms(True)
         elif t == "join_no":
+            self.clear_hint("join")
             self.q_put(fmt("{who} did not let you in", who=ev.get("by", "?")))
         elif t == "jreq":
             rq = {"room": ev.get("room"), "id": ev.get("user"), "name": ev.get("from", "?"),
@@ -4572,11 +4724,20 @@ class App(ctk.CTk):
         if not self.node and self.link and self.link.alive and time.time() - self.rooms_t > 25:
             self.refresh_rooms()
         for rid, row in self.room_rows.items():
-            setw(row["enter"], text="Entering…" if rid == self.entering_rid else "Enter")
-        if self.node:
+            if rid == self.entering_rid:
+                txt = "Entering…"
+            elif self.node and rid == self.node.rid:
+                txt = "Open"            # you are already inside: this opens the room page
+            else:
+                txt = "Enter"
+            setw(row["enter"], text=txt)
+        if self.node and self.entering_rid:
             setw(self.lbl_acct,
                  text=fmt("entering '{room}' - preparing the virtual adapter...",
                           room=self.room_name), text_color=YELLOW)
+        elif self.node:
+            setw(self.lbl_acct, text=fmt("inside '{room}' - the room stays connected",
+                                         room=self.room_name), text_color=ACC)
         elif self.err:
             setw(self.lbl_acct, text=self.err, text_color=RED)
         else:
