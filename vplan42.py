@@ -47,6 +47,9 @@ MAX_ROOMS = 3
 # team, with one "ip", "domain" or "ip:port" per line - it is tried before the default.
 SERVER_HOSTS = ["v42.ir"]
 SERVER_HOSTS_FILE = "vlan42_servers.txt"
+STAFF_FILE = "vlan42_staff.key"      # only on the VPS: what makes a console the team's
+STAFF_AAD = b"vlan42-staff"
+STAFF_WINDOW = 60
 # The app writes no logs next to itself. Only a freeze report exists, in the system temp
 # dir, read back on the next start and deleted: the Logs page is the place to read anything.
 HANG_FILE = os.path.join(tempfile.gettempdir(), "vlan42_hang.txt")
@@ -939,6 +942,23 @@ class VpsNode:
 INVITE_PFX = "vlan42://join/"      # the browser hand-off, when somebody forwards a click
 
 
+def staff_stamp():
+    """The stamp that says this app is the team's console. It is made from the server's own
+    key file - the one that never travels to a player - so a copy of the source code, or of
+    this very app, carries nothing that opens the management door."""
+    try:
+        raw = open(res_path(STAFF_FILE), encoding="utf-8").read().strip()
+        key = bytes.fromhex(raw)
+    except Exception:
+        return ""
+    if len(key) != 32:
+        return ""
+    win = int(time.time() // STAFF_WINDOW)
+    nonce = struct.pack(">QI", win, 0)
+    return base64.urlsafe_b64encode(nonce + AESGCM(key).encrypt(
+        nonce, str(win).encode(), STAFF_AAD)).decode().rstrip("=")
+
+
 def parse_invite(text):
     """A friend's code in whatever shape it arrives - dotted, spaced, or inside a whole
     deep link - reduced to the bare sealed token the server opens. None if it is no code.
@@ -1046,6 +1066,34 @@ FONT = FONT_EN
 # never picked - that is how a language switch ends up showing nothing at all.
 FA_FONTS = ("Vazir", "Vazirmatn", "Vazir FD", "Noto Sans Arabic", "Tahoma")
 _PENS = {FONT_EN} | set(FA_FONTS)   # families that follow the language, not the widget
+
+
+def human_size(n):
+    """Bytes the way a person reads them."""
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+
+
+def when(t):
+    """A moment from the server, in the shape a table column wants."""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(t)))
+    except (TypeError, ValueError):
+        return "-"
+
+
+def con_clip(text, px):
+    """Shorten a value that is too long for its column. Each frame sizes its own columns, so
+    one long word in one row would move that row's columns out of line with the header."""
+    pen = tkfont.Font(font=(FONT, 12))
+    if px <= 0 or not text or pen.measure(text) <= px:
+        return text
+    while text and pen.measure(text + "…") > px:
+        text = text[:-1]
+    return text.rstrip() + "…"
 
 
 def has_rtl(text):
@@ -1313,7 +1361,6 @@ TR = {
     "{vip}  ·  no answer since {t}": "{vip}  ·  از {t} بی‌پاسخ",
     "{vip} copied - paste it into the game": "{vip} کپی شد - در بازی آن را بچسبانید",
     "Copied ✓": "کپی شد ✓",
-    "{who} invited you to the room '{room}'": "{who} شما را به اتاق '{room}' دعوت کرده است",
     # ------------------------------------------------- logs
     "Copy log": "کپی گزارش",
     "Save log": "ذخیره‌ی گزارش",
@@ -1400,7 +1447,46 @@ TR = {
     "Connection to the server lost: {why}": "اتصال به سرور قطع شد: {why}",
     "entering '{room}' - preparing the virtual adapter...":
         "وارد شدن به '{room}' - در حال آماده کردن کارت مجازی...",
-    "{app} network online": "شبکه {app} آنلاین است",
+    # ------------------------------------------------- the password card
+    "Current password": "رمز عبور فعلی",
+    "New password": "رمز عبور جدید",
+    "New password again": "تکرار رمز عبور جدید",
+    "Change password": "تغییر رمز عبور",
+    "Fill in the current and the new password.": "رمز فعلی و رمز جدید را بنویسید.",
+    "The two new passwords do not match.": "دو رمز جدید یکسان نیستند.",
+    "You are not signed in.": "وارد نشده‌اید.",
+    "Password changed OK": "رمز عبور تغییر کرد ✓",
+    "Your password was changed": "رمز عبور شما تغییر کرد",
+    "Current password is wrong": "رمز عبور فعلی درست نیست",
+    "New password must be at least 6 characters":
+        "رمز جدید باید دست‌کم ۶ نویسه باشد",
+    "The new password is the same as the old one": "رمز جدید با رمز قبلی یکی است",
+    # ------------------------------------------------- the management panel
+    "Management": "مدیریت",
+    "Open the console": "باز کردن کنسول",
+    "This account is one the team vouched for.": "این حساب مورد تأیید تیم است.",
+    "The network, for the team": "شبکه، از نگاه تیم",
+    "Refresh": "به‌روزرسانی",
+    "Loading {what}...": "در حال بارگذاری {what}...",
+    "{what}   ·   {n} rows": "{what}   ·   ردیف: {n}",
+    "Make team": "تیم کردن",
+    "Remove from team": "خارج کردن از تیم",
+    "This is not the management console": "این کنسول مدیریت نیست",
+    "Users": "کاربران",
+    "Traffic": "ترافیک",
+    "Name": "نام",
+    "ID": "شناسه",
+    "Last seen": "آخرین بازدید",
+    "Made": "ساخته",
+    "PC": "رایانه",
+    "Online": "آنلاین",
+    "Data": "حجم",
+    "Team": "تیم",
+    "Limit": "سقف",
+    "Day": "روز",
+    "Search...": "جستجو...",
+    "The server refused that.": "سرور این کار را نپذیرفت.",
+    "Use a whole number from 2 to 64": "یک عدد صحیح بین ۲ تا ۶۴ بنویسید.",
 }
 # a segmented button hands back whatever it shows, so the handlers need the way home
 UNTR = {v: k for k, v in reversed(list(TR.items()))}
@@ -1741,7 +1827,9 @@ def retext_tree(w):
 
 
 class Label(ctk.CTkLabel):
-    """A label that remembers the English it was written with."""
+    """A label that remembers the English it was written with, and the side its own words
+    were meant to hug - a full-width label puts its text where `anchor` says, and Persian
+    reads from the other side."""
 
     def __init__(self, master=None, **kw):
         if "text" in kw:
@@ -1750,6 +1838,9 @@ class Label(ctk.CTkLabel):
         if kw.get("justify") in ("left", "right"):
             self._just = kw["justify"]
             kw["justify"] = "right" if (self._just == "left" and LANG[0] == "fa") else kw["justify"]
+        if kw.get("anchor") in ("w", "e"):
+            self._anch = kw["anchor"]
+            kw["anchor"] = ("e" if self._anch == "w" else "w") if LANG[0] == "fa" else kw["anchor"]
         super().__init__(master, **kw)
 
     def rejust(self):
@@ -1757,6 +1848,10 @@ class Label(ctk.CTkLabel):
         if j:
             self.configure(justify="right" if (j == "left" and LANG[0] == "fa")
                                   else "left" if (j == "right" and LANG[0] == "fa") else j)
+        a = getattr(self, "_anch", None)
+        if a:
+            self.configure(anchor="e" if (a == "w" and LANG[0] == "fa")
+                                  else "w" if (a == "e" and LANG[0] == "fa") else a)
 
 
 class Btn(ctk.CTkButton):
@@ -2031,6 +2126,9 @@ class App(ctk.CTk):
         self.role_key = None
         self.invite = None              # {"from","room","token"}
         self.awin = None
+        self.cwin = None            # the management panel
+        self.con_last = None        # the last table it was shown, so the words can change
+        self.staff = False            # the team vouched for this account
         self.admin_tab = "Members"      # which part of the admin panel is showing
         self.role_defaults = None       # this room's own defaults for member and admin
         self.jwin = None                # join-request panel
@@ -2093,8 +2191,10 @@ class App(ctk.CTk):
     def btn(self, parent, text, cmd, color=ACC, hover=ACC_H, h=40, **kw):
         if "text_color" not in kw:
             kw["text_color"] = ACC_TXT if color == ACC else TXT
-        return Btn(parent, text=text, command=cmd, height=h, fg_color=color, hover_color=hover,
-                             font=(FONT, 13, "bold"), corner_radius=10, **kw)
+        opts = dict(height=h, fg_color=color, hover_color=hover, font=(FONT, 13, "bold"),
+                    corner_radius=10)
+        opts.update(kw)          # a caller may want its own corner or font, and it wins
+        return Btn(parent, text=text, command=cmd, **opts)
 
     def flash(self, b, text):
         """Say something on a button for a moment, in the colour of a job done."""
@@ -2452,6 +2552,7 @@ class App(ctk.CTk):
                 link.user = r["user"]
                 link.token = r["token"]
                 self.uq.put({"t": "auth_ok", "link": link, "remember": remember,
+                             "staff": r.get("staff"),
                              "server": f"{link.host}:{link.port}", "user": r["user"]["name"]})
             except Exception as ex:
                 self.uq.put({"t": "auth_fail", "err": mask_net(f"Cannot reach the {APP_NAME} network: {ex}")
@@ -2474,6 +2575,7 @@ class App(ctk.CTk):
                     link.user = r["user"]
                     link.token = token
                     self.uq.put({"t": "auth_ok", "link": link, "remember": True,
+                                 "staff": r.get("staff"),
                                  "server": f"{link.host}:{link.port}", "user": r["user"]["name"]})
                     return
                 self.uq.put({"t": "auth_fail", "err": ""})   # silent: just show the login form
@@ -2685,6 +2787,47 @@ class App(ctk.CTk):
         self.seg_sound.set("Off" if not SOUND[0] else "On")
         self.btn(srow, "Test sound", self.beep, CARD2, LINE, h=34, width=100).pack(side="left", padx=(14, 0))
 
+        self.pwd_card = ctk.CTkFrame(self.pg_settings, fg_color=CARD, corner_radius=14,
+                                     border_width=1, border_color=LINE)
+        pin = ctk.CTkFrame(self.pwd_card, fg_color="transparent")
+        pin.pack(fill="both", expand=True, padx=20, pady=18)
+        self.cap(pin, "Password")
+        self.p_old = self.entry(pin, "Current password", show="*")
+        self.p_old.pack(fill="x", pady=(0, 6))
+        self.p_new = self.entry(pin, "New password", show="*")
+        self.p_new.pack(fill="x", pady=(0, 6))
+        self.p_again = self.entry(pin, "New password again", show="*")
+        self.p_again.pack(fill="x")
+        prow = ctk.CTkFrame(pin, fg_color="transparent")
+        prow.pack(fill="x", pady=(10, 0))
+        self.b_pwd = self.btn(prow, "Change password", self.change_password, h=38, width=170)
+        self.b_pwd.pack(side="left")
+        self.p_err = Label(prow, text="", font=(FONT, 12), text_color=MUTED, anchor="w")
+        self.p_err.pack(side="left", padx=(14, 0))
+
+        self.team_card = ctk.CTkFrame(self.pg_settings, fg_color=CARD, corner_radius=14,
+                                      border_width=1, border_color=GOLD)
+        tin = ctk.CTkFrame(self.team_card, fg_color="transparent")
+        tin.pack(fill="both", expand=True, padx=20, pady=18)
+        self.cap(tin, "Management")
+        trow = ctk.CTkFrame(tin, fg_color="transparent")
+        trow.pack(fill="x")
+        self.b_console = self.btn(trow, "Open the console", self.show_console, ACC, ACC_H, h=38,
+                                  width=170)
+        self.b_console.pack(side="left")
+        Label(trow, text="This account is one the team vouched for.", font=(FONT, 12),
+              text_color=MUTED).pack(side="left", padx=(14, 0))
+
+    def show_settings_cards(self):
+        """The password card needs an account behind it and the console card needs the
+        team's yes - so neither is on the page before its time."""
+        for card in (self.pwd_card, self.team_card):
+            card.pack_forget()
+        if self.link:
+            self.pwd_card.pack(fill="x", padx=16, pady=(0, 16))
+        if self.staff:
+            self.team_card.pack(fill="x", padx=16, pady=(0, 16))
+
     def set_lang(self, value):
         lang = "fa" if un(value).startswith("فارسی") else "en"
         if lang == LANG[0]:
@@ -2695,6 +2838,42 @@ class App(ctk.CTk):
         save_cfg(cfg)
         self.relayout()
         self.q_put(fmt("Language: {which}", which="Persian" if lang == "fa" else "English"))
+
+    def change_password(self):
+        """The account's own password, changed from Settings. The current one is asked for,
+        so a seat left unlocked is not a way in."""
+        oldp, newp, again = self.p_old.get(), self.p_new.get(), self.p_again.get()
+        if not (self.link and self.link.alive):
+            setw(self.p_err, text="You are not signed in.", text_color=RED)
+            return
+        if not oldp or not newp:
+            setw(self.p_err, text="Fill in the current and the new password.", text_color=RED)
+            return
+        if newp != again:
+            setw(self.p_err, text="The two new passwords do not match.", text_color=RED)
+            return
+        self.busy = True
+        setw(self.b_pwd, text="Please wait...", state="disabled")
+
+        def work():
+            r = self.link.req("change_password", old=oldp, new=newp)
+            self.uq.put({"t": "pwd_ans", "r": r})
+        threading.Thread(target=work, daemon=True).start()
+
+    def password_answer(self, r):
+        self.busy = False
+        setw(self.b_pwd, text="Change password", state="normal")
+        if not r.get("ok"):
+            setw(self.p_err, text=r.get("err") or "The change failed.", text_color=RED)
+            return
+        cfg = load_cfg()
+        if cfg.get("token") and r.get("token"):
+            cfg["token"] = r["token"]          # "remember me" keeps working, with the new one
+            save_cfg(cfg)
+        for e in (self.p_old, self.p_new, self.p_again):
+            e.delete(0, "end")
+        self.q_put("Your password was changed")
+        setw(self.p_err, text="Password changed OK", text_color=ACC)
 
     def set_sound(self, value):
         SOUND[0] = un(value) == "On"
@@ -2756,6 +2935,14 @@ class App(ctk.CTk):
         except Exception:
             pass
         try:
+            if self.cwin and self.cwin.winfo_exists():
+                if self.con_last:
+                    self.console_ready(*self.con_last)   # the table and its note, in the new words
+                else:
+                    self.console_draw()
+        except Exception:
+            pass
+        try:
             self.mirror_all(rtl)
         except Exception as e:
             self.q_put(fmt("Layout: {e}", e=e))
@@ -2781,6 +2968,8 @@ class App(ctk.CTk):
             if role in ("owner", "admin"):
                 self.row_mod.pack(fill="x", pady=(0, 6), before=self.row_common)
         page = self.pages.get(name, self.pages["login"])
+        if name == "settings":
+            self.show_settings_cards()      # the password card and the team card
         page.pack(fill="both", expand=True)
         self.page = name
         try:
@@ -2796,6 +2985,7 @@ class App(ctk.CTk):
     # ------------------------------------------------------------ auth events
     def on_auth_ok(self, ev):
         self.link = ev["link"]
+        self.staff = bool(ev.get("staff"))
         self.link.push_cb = lambda p: self.uq.put(p)
         self.link.down_cb = self.on_link_down
         self.my_name = ev["user"]
@@ -2850,13 +3040,15 @@ class App(ctk.CTk):
             except Exception:
                 pass
         self.notes = []
-        for w in (self.awin, self.jwin):
+        for w in (self.awin, self.jwin, self.cwin):
             if w:
                 try:
                     w.destroy()
                 except Exception:
                     pass
-        self.awin = self.jwin = None
+        self.awin = self.jwin = self.cwin = None
+        self.con_last = None
+        self.staff = False
         self.admin_tab, self.jreq, self.jreq_n, self.await_enter = "Members", [], 0, None
         self.show_page("login")
 
@@ -3169,6 +3361,232 @@ class App(ctk.CTk):
         self.copy_text(code)
         self.flash(self.b_inv, "Copied ✓")
         self.q_put(fmt("Invite code copied - send it to a friend"))
+
+    # ------------------------------------------------------------ management console
+    CON_VIEWS = ("Users", "Rooms", "Traffic")
+    # key, header, width in pixels. One column - the one called "name" - is allowed to
+    # stretch; every other column is the same width in the header and in every row, so the
+    # words above line up with the values below however long they are.
+    CON_COLS = {
+        "Users": (("name", "Name", 0), ("id", "ID", 46), ("last", "Last seen", 140),
+                  ("created", "Made", 140), ("machine", "PC", 120), ("rooms", "Rooms", 52),
+                  ("online", "Online", 46), ("bytes", "Data", 80), ("staff", "Team", 40)),
+        "Rooms": (("id", "ID", 46), ("name", "Room", 0), ("owner", "Owner", 150),
+                  ("members", "Members", 70), ("online", "Online", 60), ("limit", "Limit", 74),
+                  ("created", "Made", 140)),
+        "Traffic": (("name", "Name", 0), ("day", "Day", 140), ("bytes", "Data", 80)),
+    }
+    CON_ACT = {"Users": (142,), "Rooms": (68, 96), "Traffic": ()}
+
+    def admin(self, cmd):
+        """One line to the server's management commands, over the same encrypted channel.
+        The stamp is what says who: without the key file on this PC it is empty, and the
+        server answers 'not the management console'."""
+        if not (self.link and self.link.alive):
+            return {"t": "admin", "ok": False, "err": "Not connected"}
+        return self.link.req("admin", stamp=staff_stamp(), cmd=cmd)
+
+    def show_console(self):
+        if self.cwin and self.cwin.winfo_exists():
+            self.cwin.deiconify()
+            self.cwin.lift()
+            return
+        w = self.cwin = ctk.CTkToplevel(self)
+        w.geometry("1040x660")
+        w.configure(fg_color=BG)
+        self.brand(w, "Management")
+        self.panel_head(w, "The network, for the team")
+        bar = ctk.CTkFrame(w, fg_color="transparent")
+        bar.pack(fill="x", padx=14, pady=(10, 2))
+        self.con_seg = Seg(bar, values=list(self.CON_VIEWS), command=self.console_view,
+                           height=34, font=(FONT, 12, "bold"), fg_color=CARD2,
+                           selected_color=ACC, selected_hover_color=ACC_H,
+                           unselected_color=CARD2, text_color=TXT)
+        self.con_seg.pack(side="left")
+        self.con_find = self.entry(bar, "Search...")
+        self.con_find.pack(side="left", fill="x", expand=True, padx=12)
+        self.con_find.bind("<KeyRelease>", lambda e: self.console_draw())
+        self.btn(bar, "Refresh", self.console_load, CARD2, LINE, h=34, width=100).pack(side="right")
+        self.con_head = ctk.CTkFrame(w, fg_color="transparent")
+        self.con_head.pack(fill="x", padx=12, pady=(6, 0))
+        self.con_body = ctk.CTkScrollableFrame(w, fg_color="transparent")
+        self.con_body.pack(fill="both", expand=True, padx=12, pady=(2, 6))
+        self.con_note = Label(w, text="", font=(FONT, 11), text_color=MUTED, anchor="w")
+        self.con_note.pack(fill="x", padx=16, pady=(0, 10))
+        try:
+            self.con_gap = int(self.con_body._scrollbar.winfo_reqwidth()) + 4
+        except Exception:
+            self.con_gap = 20
+        self.con_view, self.con_rows, self.con_sort, self.con_desc = "Users", [], "name", False
+        self.console_load()
+
+    def console_view(self, value):
+        self.con_sort = "name"
+        self.set_admin_view(un(value))
+
+    def set_admin_view(self, view):
+        self.con_view = view
+        if self.cwin and self.cwin.winfo_exists():
+            try:
+                self.con_seg.set(T(view))
+            except Exception:
+                pass
+            self.console_load()
+
+    def console_load(self):
+        """Ask the server for the whole view in a thread, so the window stays responsive."""
+        if not (self.cwin and self.cwin.winfo_exists()):
+            return
+        view = self.con_view
+        setw(self.con_note, text=fmt("Loading {what}...", what=T(view)))
+        for c in self.con_body.winfo_children():
+            c.destroy()
+
+        def work():
+            r = self.admin(view.lower())
+            self.uq.put({"t": "con_rows", "view": view, "r": r})
+        threading.Thread(target=work, daemon=True).start()
+
+    def console_ready(self, view, r):
+        if not (self.cwin and self.cwin.winfo_exists()) or view != self.con_view:
+            return
+        self.con_last = (view, r)          # the language switch says the note over again
+        if not r.get("ok"):
+            self.con_rows = []
+            setw(self.con_note, text=T(r.get("err") or "The server refused that."), text_color=RED)
+            self.console_draw()
+            return
+        self.con_rows = r.get("rows") or []
+        setw(self.con_note, text=fmt("{what}   ·   {n} rows", n=len(self.con_rows),
+                                     what=fmt("signed in as") + " " + str(self.my_name)),
+             text_color=MUTED)
+        self.console_draw()
+
+    def con_cell(self, parent, text, col, anchor="w"):
+        """One table cell: the same column position in the header and in every row."""
+        cell = Label(parent, text=text, font=(FONT, 12), anchor=anchor,
+                           text_color=MUTED if anchor == "e" else TXT)
+        cell.grid(row=0, column=col, sticky="nsew", padx=6, pady=5)
+        return cell
+
+    def console_shape(self, w):
+        """The widths this view measured, written into one frame. The header and every row get
+        the same numbers, so a word sits over the value it names and only the name column
+        stretches - in the header and in every row at the same place."""
+        lead = self.con_lead
+        for i, px in enumerate(self.con_cols):
+            w.grid_columnconfigure(i, minsize=px, weight=1 if i == lead else 0)
+
+    def console_draw(self):
+        if not (self.cwin and self.cwin.winfo_exists()):
+            return
+        cols = self.CON_COLS[self.con_view]
+        keys = [c[0] for c in cols]
+        for c in self.con_head.winfo_children() + self.con_body.winfo_children():
+            c.destroy()
+        heads = []
+        for n_, (key, label, px) in enumerate(cols):
+            # width 0: the column decides how wide a header is. Nine buttons of customtkinter's
+            # default 140 pixels would leave the stretching columns nothing to stand on.
+            btn = self.btn(self.con_head, label, lambda k=key: self.console_sort(k),
+                           CARD2, LINE, h=30, corner_radius=8, width=0)
+            if self.con_sort == key:
+                # the arrow says which way the table is ordered, so it needs no words
+                btn.configure(text=T(label) + (" ▲" if not self.con_desc else " ▼"))
+            btn.grid(row=0, column=n_, sticky="nsew", padx=6, pady=2)
+            btn.update_idletasks()        # a fresh customtkinter button only knows its own
+            heads.append(btn)             # width after an idle pass, and the columns need it
+        # what the header words really need, in this language and this pen, plus what the
+        # code asked for - and the same numbers go into every row below
+        self.con_lead = next(i for i, c in enumerate(cols) if c[0] == "name")
+        self.con_cols = [max(px, b.winfo_reqwidth() + 12)
+                         for (_, _, px), b in zip(cols, heads)]
+        self.con_cols += list(self.CON_ACT[self.con_view])
+        self.console_shape(self.con_head)
+        # the list keeps room at its edge for its own scrollbar; the header keeps the same
+        # room in a column of its own, or its words stop short of the values they name
+        self.con_head.grid_columnconfigure(len(self.con_cols), minsize=self.con_gap, weight=0)
+
+        needle = (self.con_find.get() or "").strip().lower()
+        rows = [r for r in self.con_rows
+                if not needle or any(needle in str(r.get(k, "")).lower() for k in keys)]
+        good = [r for r in rows if isinstance(r.get(self.con_sort), (int, float, str))]
+        try:
+            good.sort(key=lambda r: (str(r.get(self.con_sort)).lower()
+                                     if isinstance(r.get(self.con_sort), str) else r.get(self.con_sort)),
+                      reverse=self.con_desc)
+        except TypeError:
+            pass
+        for r in rows:
+            if r not in good:
+                good.append(r)
+
+        body = self.con_body
+        edit = self.staff and self.con_view in ("Users", "Rooms")
+        for i, r in enumerate(good):
+            row = ctk.CTkFrame(body, fg_color=CARD if i % 2 == 0 else CARD2,
+                               corner_radius=10, border_width=1, border_color=LINE)
+            row.pack(fill="x", pady=2)
+            self.console_shape(row)
+            lim = None
+            for n_, (key, label, px) in enumerate(cols):
+                v = r.get(key)
+                if key == "limit" and edit:
+                    # the team can retune how many players a room holds, right in the row
+                    lim = ctk.CTkEntry(row, height=26, width=56, font=(FONT, 12),
+                                       justify="center", fg_color=BG, border_color=LINE,
+                                       text_color=TXT)
+                    lim.grid(row=0, column=n_, sticky="ns", padx=6, pady=4)
+                    lim.insert(0, str(v))
+                    continue
+                if key in ("created", "last"):
+                    v = when(v)
+                elif key == "bytes":
+                    v = human_size(v)
+                elif key == "online":
+                    v = "●" if v else "○"
+                elif key == "staff":
+                    v = "★" if v else "-"
+                self.con_cell(row, str(v) if n_ == self.con_lead else
+                              con_clip(str(v), self.con_cols[n_] - 12), n_)
+            if edit:
+                if self.con_view == "Users":
+                    act = "Remove from team" if r.get("staff") else "Make team"
+                    self.btn(row, act, lambda who=str(r.get("name")), on=not r.get("staff"):
+                             self.set_team(who, on), CARD2, LINE, h=26, width=130
+                             ).grid(row=0, column=len(cols), padx=6, pady=4)
+                else:
+                    self.btn(row, "Save", lambda rid=r.get("id"), e=lim:
+                             self.set_limit(rid, e.get()), ACC, ACC_H, h=26, width=84
+                             ).grid(row=0, column=len(cols) + 1, padx=(0, 6), pady=4)
+
+    def set_team(self, who, on):
+        """Move one account in or out of the team. The server only ever listens when the
+        stamp came from the key file, so this is a door only the team's own PC can open."""
+        self.send_admin(("set admin " if on else "remove admin ") + who)
+
+    def set_limit(self, rid, value):
+        """How many players a room may hold - typed in the row, checked here and again there."""
+        if not str(value).isdigit() or not (2 <= int(value) <= 64):
+            return self.notify("Management", T("Use a whole number from 2 to 64"))
+        self.send_admin(f"set limit {rid} {value}")
+
+    def send_admin(self, cmd):
+        def work():
+            r = self.admin(cmd)
+            self.uq.put({"t": "con_done", "r": r})
+        threading.Thread(target=work, daemon=True).start()
+
+    def console_answer(self, r):
+        if not r.get("ok"):
+            self.notify("Management", T(r.get("err") or "The server refused that."))
+
+    def console_sort(self, key):
+        if self.con_sort == key:
+            self.con_desc = not self.con_desc
+        else:
+            self.con_sort, self.con_desc = key, False
+        self.console_draw()
 
     # ------------------------------------------------------------ moderation
     def my_role(self):
@@ -3925,6 +4343,13 @@ class App(ctk.CTk):
             self.on_auth_ok(ev)
         elif t == "auth_fail":
             self.on_auth_fail(ev)
+        elif t == "pwd_ans":
+            self.password_answer(ev["r"])
+        elif t == "con_rows":
+            self.console_ready(ev["view"], ev["r"])
+        elif t == "con_done":
+            self.console_answer(ev["r"])
+            self.console_load()
         elif t == "my_rooms":
             self.on_my_rooms(ev["rooms"])
         elif t == "enter_room":

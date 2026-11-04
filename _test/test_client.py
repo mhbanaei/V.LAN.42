@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOST, PORT = "127.0.0.1", 45242
+STAFF_KEY = hashlib.sha256(b"the team key of this test").hexdigest()
 PASS, FAIL = [], []
 
 
@@ -25,6 +26,10 @@ def boot_server():
     shutil.rmtree(os.path.join(HERE, "vlan42_data"), ignore_errors=True)
     with open(os.path.join(HERE, "vlan42_server.json"), "w", encoding="utf-8") as f:
         json.dump({"tcp_port": PORT, "udp_port": PORT}, f)
+    # the team's key: the file that never travels to a player. Written before the server
+    # starts so the checks below and the server agree on what a real stamp looks like.
+    with open(os.path.join(HERE, "vlan42_staff.key"), "w", encoding="utf-8") as f:
+        f.write(STAFF_KEY)
     proc = subprocess.Popen([sys.executable, "vlan42_server.py"], cwd=HERE,
                             stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     for _ in range(50):
@@ -513,6 +518,133 @@ def main():
     tgt = [x for x in rooms if x["id"] == rid]
     check("ownership transferred to bob", tgt and tgt[0]["my_role"] == "owner", str(tgt and tgt[0]["my_role"]))
 
+    # ------------------------------------------------- changing your own password
+    p = TClient("pwdguy")
+    r = p.req("register", u="pwdguy", p="pw123")
+    check("an account to try the password door on", r.get("ok"), str(r))
+    q = TClient("pwdguy-in")
+    r = q.req("login", u="pwdguy", p="pw123")
+    check("and it signs in", r.get("ok"), str(r))
+    old_token = r.get("token")
+    r = q.req("change_password", old="not it", new="apassword2")
+    check("the wrong current password opens nothing",
+          not r.get("ok") and r.get("err") == "Current password is wrong", str(r))
+    r = q.req("change_password", old="pw123", new="abc")
+    check("a new password under six characters is refused",
+          not r.get("ok") and "6 characters" in r.get("err", ""), str(r))
+    r = q.req("change_password", old="pw123", new="pw123")
+    check("the same password twice is refused", not r.get("ok"), str(r))
+    r = q.req("change_password", old="pw123", new="apassword2")
+    check("the password changes", r.get("ok") and bool(r.get("token")), str(r))
+    new_token = r.get("token")
+    check("the seat that changed it stays signed in", q.req("my_rooms").get("ok"))
+    check("the old password no longer opens it",
+          not q.req("login", u="pwdguy", p="pw123").get("ok"))
+    check("the old remember-me token is retired",
+          not q.req("login_token", token=old_token).get("ok"))
+    check("no other account was touched by it", a.req("my_rooms").get("ok"))
+    q2 = TClient("pwdguy-again")
+    check("the new remember-me token opens the door",
+          q2.req("login_token", token=new_token).get("ok"), str(q2))
+    check("and the new password does", q2.req("login", u="pwdguy", p="apassword2").get("ok"))
+    check("while the old one stays shut",
+          not q2.req("login", u="pwdguy", p="pw123").get("ok"))
+
+    # ------------------------------------------------- the team's own console
+    def stamp_of(secret, ahead=0):
+        win = int((time.time() + ahead) // 60)
+        n = struct.pack(">QI", win, 0)
+        return base64.urlsafe_b64encode(n + AESGCM(bytes.fromhex(secret)).encrypt(
+            n, str(win).encode(), b"vlan42-staff")).decode().rstrip("=")
+
+    def console(*words):
+        """Run the command the way the team does: typed at the server's own window."""
+        p = subprocess.run([sys.executable, "vlan42_server.py", *words], cwd=HERE,
+                           capture_output=True, text=True, timeout=60)
+        return p.stdout.strip(), p.returncode
+
+    def admin(who, cmd, stamp=None):
+        return who.req("admin", stamp=stamp if stamp is not None else stamp_of(STAFF_KEY), cmd=cmd)
+
+    foreign = hashlib.sha256(b"a key nobody but the player has").hexdigest()
+    r = admin(a, "users", stamp="")
+    check("no stamp: the door stays shut",
+          not r.get("ok") and r.get("err") == "This is not the management console", str(r))
+    r = admin(a, "users", stamp=stamp_of(foreign))
+    check("a stamp from another key is worthless", not r.get("ok"), str(r))
+    r = admin(a, "users", stamp=stamp_of(STAFF_KEY, -3600))
+    check("an old stamp has expired", not r.get("ok"), str(r))
+    r = admin(a, "users", stamp=stamp_of(STAFF_KEY, 600))
+    check("and a stamp from the future counts for nothing", not r.get("ok"), str(r))
+    r = admin(a, "set admin alice")
+    check("a real stamp from an account the team did not vouch is still refused",
+          not r.get("ok") and r.get("err") == "This account is not management", str(r))
+    r = admin(a, "users", stamp=stamp_of(STAFF_KEY)[:20])
+    check("a stamp cut short does not parse", not r.get("ok"), str(r))
+
+    out, rc = console("set", "admin", "alice")
+    check("the server window vouches for a name", rc == 0 and "is management now" in out, out)
+    r = a.req("login", u="alice", p="pw123")
+    check("the app is told this account is the team", r.get("ok") and r.get("staff") is True, str(r))
+    r = admin(a, "users")
+    rows = r.get("rows") or []
+    check("the team reads the user list", r.get("ok") and len(rows) >= 3, str(r)[:120])
+    one = next((x for x in rows if x["name"] == "alice"), {})
+    check("a user line carries what the panel shows",
+          all(k in one for k in ("id", "name", "created", "last", "machine", "rooms",
+                                 "online", "bytes", "staff", "today"))
+          and one["staff"] is True and one["online"] is True, str(one))
+    check("and the moment it was made is a moment, not a code",
+          isinstance(one.get("created"), float) and one["created"] > 0, str(one.get("created")))
+    box_line = next((x for x in rows if x["name"] == "pc1"), {})
+    check("a line from the box that was counted shows its PC",
+          box_line.get("machine") == box[:12], str(box_line))
+    check("and an account that gave no hash is not invented one",
+          next((x for x in rows if x["name"] == "preexisting"), {}).get("machine") in ("", fresh[:12]),
+          str(next((x for x in rows if x["name"] == "preexisting"), {})))
+    check("and the console prints the same list", "alice" in admin(a, "users").get("out", ""))
+    r = admin(a, "rooms")
+    rooms = r.get("rows") or []
+    line = next((x for x in rooms if x["id"] == rid), {})
+    check("the team reads the room list",
+          r.get("ok") and line.get("owner") == "bob" and line.get("members") >= 2, str(line))
+    a.relays_to(rid, ua, ub, payload)
+    traffic = []
+    end = time.time() + 10
+    while time.time() < end and not traffic:
+        traffic = admin(a, "traffic").get("rows") or []
+        if not traffic:
+            time.sleep(0.6)
+    check("the team reads the data each player moved",
+          bool(traffic) and all(t["day"] == time.strftime("%Y-%m-%d") and t["bytes"] > 0
+                                for t in traffic), str(traffic[:2]))
+    check("every line names a player", all(t.get("name") for t in traffic))
+
+    r = admin(a, f"set limit {rid} 5")
+    check("the team retunes a room from the console", r.get("ok"), str(r))
+    check("and the room says so",
+          any(x["id"] == rid and x["limit"] == 5 for x in admin(a, "rooms").get("rows") or []))
+    check("the players in that room hear about it", b.drain_push("room_state", timeout=6) is not None)
+    check("a limit below the members already inside is refused",
+          not admin(a, f"set limit {rid} 2").get("ok"))
+    check("so is a number out of range", not admin(a, f"set limit {rid} 900").get("ok"))
+    check("and a room that does not exist", not admin(a, "set limit 99999 8").get("ok"))
+    check("a half-typed command is refused", not admin(a, "set limit").get("ok"))
+    check("so is a command nobody knows", not admin(a, "launch rocket").get("ok"))
+    r = admin(a, "status")
+    check("status counts the network", r.get("ok") and "accounts" in r.get("out", ""), str(r))
+
+    out, rc = console("remove", "admin", "alice")
+    check("the server window takes the right back",
+          rc == 0 and "not management any more" in out, out)
+    check("the app learns it on the next sign-in",
+          a.req("login", u="alice", p="pw123").get("staff") is False)
+    check("and the console door shuts behind it", not admin(a, "users").get("ok"))
+    cfg = json.load(open(os.path.join(HERE, "vlan42_server.json"), encoding="utf-8"))
+    check("the vouch list lives only in the server's own file",
+          cfg.get("staff") == [] and cfg.get("tcp_port") == PORT, str(cfg))
+    check("the player's commands still work after all that", a.req("my_rooms").get("ok"))
+
     print()
     print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
@@ -528,7 +660,7 @@ if __name__ == "__main__":
         srv.terminate()
         srv.wait(timeout=5)
         shutil.rmtree(os.path.join(HERE, "vlan42_data"), ignore_errors=True)
-        for junk in ("vlan42_server.py", "vlan42_server.json"):
+        for junk in ("vlan42_server.py", "vlan42_server.json", "vlan42_staff.key"):
             try:
                 os.remove(os.path.join(HERE, junk))
             except OSError:

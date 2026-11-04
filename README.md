@@ -56,12 +56,39 @@ entering a room fails.
 
 | file | what it is |
 |---|---|
-| `vlan42_server.json` | ports, `udp_timeout` and the `invite_key` that mints invite codes |
-| `vlan42_data/db.sqlite` | accounts, rooms, friends, messages |
+| `vlan42_server.json` | ports, `udp_timeout`, the `invite_key` that mints invite codes and the `staff` list |
+| `vlan42_data/db.sqlite` | accounts, rooms, friends, messages, per-day traffic |
 | `vlan42_servers.txt` | the addresses clients try, in order - the team's file, not the players' |
+| `vlan42_staff.key` | 32 random bytes written the first time the server runs - the management door |
 
-`vlan42_server.json` and `vlan42_data/` hold live data and the invite key. **Do not
-commit them.**
+`vlan42_server.json`, `vlan42_staff.key` and `vlan42_data/` hold live data, the invite key
+and the way into the management console. **Do not commit them, and do not copy the key file
+to a player's machine** - it is what makes the team the team.
+
+### The management console
+
+Typed at the server's own window, next to `vlan42_server.py`:
+
+```
+python vlan42_server.py status                  what is running right now
+python vlan42_server.py users                   every account: made, seen, its PC, its rooms, its data
+python vlan42_server.py rooms                   every room: owner, members, who is in it now
+python vlan42_server.py traffic                 bytes the relay moved, per player per day
+python vlan42_server.py set admin <name>        let that account open the panel inside the app
+python vlan42_server.py remove admin <name>     take that right back
+python vlan42_server.py set limit <room> <n>    how many players a room may hold (2-64)
+python vlan42_server.py help                    this list
+```
+
+There is no password to type: the console proves itself with a stamp made from
+`vlan42_staff.key` - which lives only on this server - and it only ever speaks over
+loopback. A stamp is worth one minute.
+
+The same facts as a table inside the app: **Settings → Open the console**, which appears
+only for an account the team vouched for. *Users / Rooms / Traffic*, a click on a column
+header to sort, a box to search, `Make team` / `Remove from team` on a user row, and each
+room's player ceiling typed in its own row. A fresh vouch reaches that account the next
+time it signs in.
 
 ---
 
@@ -81,7 +108,11 @@ Inside the app:
   player: status dot, name, their ping, and clicking the card copies their virtual IP.
   The room stays attached to the server even when you are the only one inside.
 * **Logs** - everything the app has to say. Nothing is written to a `.log` file.
-* **Settings** - English / فارسی.
+* **Settings** - English / فارسی, the message sound, and a card to change your own
+  password. The current one is asked for, so a seat left unlocked is not a way in; the
+  new one has to be at least 6 characters, every other session of the account is dropped,
+  and *remember me* carries on with the new password. For the team, one more card:
+  *Open the console*.
 
 A room does not die with its host. When the owner leaves, ownership moves to the
 longest-serving admin and, if there is none, to any other member - so the room and its
@@ -140,12 +171,14 @@ and Persian text is drawn in **Vazir** (falling back through `Vazirmatn`, `Vazir
 
 What the mirror covers, because a word that is not moved is a word that disappears:
 
-* every page, every floating panel (admin, invite) and every notice card;
-* rows built *after* the switch - room rows, player cards, friend rows - caught by the
-  slow pass in `tick()`;
-* the inside of scroll lists (Rooms, Players, Friends, Admin panel): customtkinter builds
-  them as a canvas holding a frame, and the frame's rows are mirrored while the canvas,
-  the scrollbar and the caption are left exactly where customtkinter put them;
+* every page (including the Settings password card), every floating panel (admin, invite,
+  the management console) and every notice card;
+* rows built *after* the switch - room rows, player cards, friend rows, a console table
+  redrawn while it is open - caught by the slow pass in `tick()`;
+* the inside of scroll lists (Rooms, Players, Friends, Admin panel, the console's tables):
+  customtkinter builds them as a canvas holding a frame, and the frame's rows are mirrored
+  while the canvas, the scrollbar and the caption are left exactly where customtkinter put
+  them;
 * grid columns *and* the column that stretches, so a mirrored row keeps its shape instead
   of opening a gap in the middle;
 * the **order** inside a packed column: `pack` puts anything it re-packs at the end of its
@@ -178,8 +211,9 @@ file next to your `vlan42_servers.txt` if you change the addresses.
 
 ## Before you push
 
-`.gitignore` keeps the live state out of the repository: the database, both config files
-(`vlan42_server.json` holds the invite key) and anything ending in `.log`. Look at
+`.gitignore` keeps the live state out of the repository: the database, the configs
+(`vlan42_server.json` holds the invite key, `vlan42_staff.key` the management door) and
+anything ending in `.log`. Look at
 `vlan42_servers.txt` before you commit it - it lists your real VPS addresses, and a public
 repository publishes them to the world. `v42.ir` alone is usually enough.
 
@@ -190,13 +224,14 @@ protocol:
 
 ```
 python _test/test_rolling.py      # invite sealing, dice, join cooloff
-python _test/test_client.py       # full protocol against a throw-away server (port 45242)
+python _test/test_client.py       # protocol, throw-away server on 45242: rooms, invites, the
+                                  # machine cap, changing a password, the management console
 python _test/test_enter_room.py   # joining, approval, roster
 python _test/test_timeouts.py     # UDP silence and the reason a peer dropped
 python _test/test_rooms_ui.py     # the landing room list
 python _test/test_friends_pm.py   # requests, private messages, instant updates
-python _test/test_ui_tabs.py      # the real window: tabs, cards, invites, panels
-python _test/test_lang_ui.py      # English <-> Persian: words, geometry, font
+python _test/test_ui_tabs.py      # the real window: tabs, cards, invites, panels, the tables
+python _test/test_lang_ui.py      # English <-> Persian: words, geometry, font, mirrored tables
 ```
 
 Run them one at a time - they share the config file and the test ports.
@@ -218,6 +253,14 @@ Run them one at a time - they share the config file and the test ports.
   "the network". Virtual room IPs (`10.77.0/16`) are left alone - those are the numbers
   players put into their game, and a click on a player line copies one to the clipboard
   and marks the line `Copied ✓`.
+* **The management door needs a key that is not in the app.** A player who has the whole
+  source code still has nothing: `do_admin` accepts a command only with a stamp made by a
+  process that can read `vlan42_staff.key` (AES-256-GCM over the minute it was minted,
+  AAD `vlan42-staff`), and that file lives on the VPS alone. A connection that is also
+  signed in as a player needs a second thing - that username has to appear in the `staff`
+  list the server keeps in its *own* `vlan42_server.json`, which no client writes. A stamp
+  copied off the wire is worthless a minute later, `remove admin` closes the door on the
+  next sign-in, and every refusal says the same flat "this is not the management console".
 * **Three accounts to a PC, no more.** The app hashes what Windows and the BIOS say about
   the box (`machine_id()`: install GUID, board maker/product/serial, and WMI's UUID and CPU
   signature only if the registry had nothing) and sends only that hash. The server keeps it

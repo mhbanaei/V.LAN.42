@@ -36,6 +36,16 @@ DEFAULT_TCP_PORT = 4242
 DEFAULT_UDP_PORT = 4242
 PERMS = ("kick", "ban", "unban", "limit", "approve", "invite")
 
+# ---------------------------------------------------------- management console
+# The team's own door. Its key is made on the first run and lives in one file next to
+# the database; nothing of it ships to a player, so reading vplan42.py - or the whole
+# of this file - gives nobody the right to name an admin. The console proves itself
+# with a stamp that only the same key can make, and the stamp is worth one minute.
+STAFF_FILE = os.path.join(APP_DIR, "vlan42_staff.key")
+STAFF_AAD = b"vlan42-staff"
+STAFF_WINDOW = 60
+STAFF_MIN_PW = 8
+
 # What each role may do in a room before the owner ticks anything. A member is a guest
 # with a virtual cable: no moderating and no inviting. An admin may bring friends in and
 # may remove and block people, but sets no limits, approves nobody and manages nobody.
@@ -52,6 +62,57 @@ def log(msg):
     """The console is the only place a server writes: start_server.bat keeps the window open
     (and can redirect it wherever the team likes). Nothing is left behind as a log file."""
     print(time.strftime("%Y-%m-%d %H:%M:%S ") + str(msg), flush=True)
+
+
+def staff_key():
+    """The one secret that says who may run the management commands."""
+    try:
+        raw = open(STAFF_FILE, encoding="utf-8").read().strip()
+    except OSError:
+        raw = ""
+    if re.fullmatch(r"[0-9a-f]{64}", raw):
+        return bytes.fromhex(raw)
+    key = secrets.token_bytes(32)
+    try:
+        with open(STAFF_FILE, "w", encoding="utf-8") as f:
+            f.write(key.hex())
+        try:
+            os.chmod(STAFF_FILE, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        log("staff key: the file is unwritable, so the management console cannot sign in")
+    return key
+
+
+def staff_stamp(ahead=None):
+    """A stamp naming the window it was made in - what the console hands over as its
+    credentials. It stays good through the window after that, so a slow trip is fine,
+    and then it is worthless: a copy of it is no use tomorrow."""
+    win = (time.time() + (ahead or 0)) // STAFF_WINDOW
+    win = int(win)
+    nonce = struct.pack(">QI", win, 0)
+    return base64.urlsafe_b64encode(nonce + AESGCM(staff_key()).encrypt(
+        nonce, str(win).encode(), STAFF_AAD)).decode().rstrip("=")
+
+
+def staff_ok(stamp):
+    """Does this stamp come from a process that holds the key? Only the window it names,
+    or the one before it, is accepted - a captured stamp stops being useful in a minute."""
+    try:
+        raw = base64.urlsafe_b64decode((stamp or "") + "=" * (-len(stamp or "") % 4))
+        win = int(AESGCM(staff_key()).decrypt(raw[:12], raw[12:], STAFF_AAD))
+    except Exception:
+        return False
+    now = int(time.time() // STAFF_WINDOW)
+    return win in (now, now - 1)
+
+
+def staff_users(cfg=None):
+    """The names the team vouched for. They are the only accounts that can read the
+    management panel, and they live in the server's own config."""
+    cfg = cfg if cfg is not None else load_cfg()
+    return {str(x).lower() for x in (cfg.get("staff") or [])}
 
 
 def load_cfg():
@@ -139,7 +200,7 @@ class DB:
             self.cx.executescript("""
             CREATE TABLE IF NOT EXISTS users(
                 id INTEGER PRIMARY KEY, username TEXT UNIQUE COLLATE NOCASE,
-                salt TEXT, pwhash TEXT, token TEXT, created REAL);
+                salt TEXT, pwhash TEXT, token TEXT, created REAL, last REAL);
             CREATE TABLE IF NOT EXISTS rooms(
                 id INTEGER PRIMARY KEY, code TEXT UNIQUE, name TEXT,
                 salt TEXT, pwhash TEXT, roomkey TEXT, pwd TEXT,
@@ -161,13 +222,17 @@ class DB:
             CREATE TABLE IF NOT EXISTS jreq(
                 room_id INTEGER, user_id INTEGER, ts REAL,
                 PRIMARY KEY(room_id, user_id));
+            CREATE TABLE IF NOT EXISTS traffic(
+                user_id INTEGER, day TEXT, bytes INTEGER,
+                PRIMARY KEY(user_id, day));
             """)
             # which box made the account - on a fresh database and on one that predates
             # the rule alike, the column is added before anything reads the table
-            try:
-                self.cx.execute("ALTER TABLE users ADD COLUMN machine TEXT")
-            except sqlite3.OperationalError:
-                pass                      # a database that already grew the column
+            for column in ("machine TEXT", "last REAL"):
+                try:
+                    self.cx.execute(f"ALTER TABLE users ADD COLUMN {column}")
+                except sqlite3.OperationalError:
+                    pass                  # a database that already grew it
             self.cx.execute("CREATE INDEX IF NOT EXISTS users_machine ON users(machine)")
             self.cx.commit()
 
@@ -213,6 +278,8 @@ class Server:
         self.ep_users = {}         # (ip,port) -> user_id
         self.tokens = {}           # raw 16-byte token -> user_id (cache)
         self.join_fails = []       # [(user_id, when)] - the anti-guessing counter
+        self.tally = {}            # user_id -> bytes relayed since the last flush
+        self.cfg = cfg               # the server's own file: the staff list lives here
         self.invkey = invite_key(cfg)
         self.udp_ready = False
 
@@ -321,7 +388,8 @@ class Server:
                     "VALUES(?,?,?,?,?,?)",
                     (u, salt, pw_hash(p, salt), token, time.time(), machine))
         c.login(self.user_by_name(u))
-        return {"t": "register", "ok": True, "token": token, "user": {"id": c.user["id"], "name": u}}
+        return {"t": "register", "ok": True, "token": token, "user": {"id": c.user["id"], "name": u},
+                "staff": u.lower() in staff_users(self.cfg)}
 
     def do_login(self, c, m):
         u = self.user_by_name((m.get("u") or "").strip())
@@ -332,9 +400,10 @@ class Server:
                     "err": f"This PC already has {MAX_ACCOUNTS_PER_MACHINE} accounts - "
                            f"sign in to one of them instead"}
         token = secrets.token_hex(16)
-        self.db.run("UPDATE users SET token=? WHERE id=?", (token, u["id"]))
+        self.db.run("UPDATE users SET token=?, last=? WHERE id=?", (token, time.time(), u["id"]))
         c.login(self.user_by_name(u["username"]))
-        return {"t": "login", "ok": True, "token": token, "user": {"id": u["id"], "name": u["username"]}}
+        return {"t": "login", "ok": True, "token": token, "user": {"id": u["id"], "name": u["username"]},
+                "staff": u["username"].lower() in staff_users(self.cfg)}
 
     def note_machine(self, u, m):
         """An account made before this rule still gets a home: the first PC it signs in
@@ -352,13 +421,40 @@ class Server:
         self.db.run("UPDATE users SET machine=? WHERE id=?", (hw.group(0), u["id"]))
         return True
 
+    def do_change_password(self, c, m):
+        """Change the password of the account that is signed in - from the Settings page.
+        The old one is asked for, so a seat left unlocked is not a way in, and every other
+        session of the account is dropped: the new password is the only one that opens it."""
+        uid = c.user["id"]
+        u = self.user_by_id(uid)
+        oldp, newp = m.get("old") or "", m.get("new") or ""
+        if not u or pw_hash(oldp, u["salt"]) != u["pwhash"]:
+            return {"t": "change_password", "ok": False, "err": "Current password is wrong"}
+        if len(newp) < 6:
+            return {"t": "change_password", "ok": False, "err": "New password must be at least 6 characters"}
+        if newp == oldp:
+            return {"t": "change_password", "ok": False, "err": "The new password is the same as the old one"}
+        salt = secrets.token_hex(16)
+        token = secrets.token_hex(16)
+        self.db.run("UPDATE users SET salt=?, pwhash=?, token=? WHERE id=?",
+                    (salt, pw_hash(newp, salt), token, uid))
+        with self.lock:                          # every OTHER session of the account goes
+            others = [x for x in list(self.conns.values())
+                      if x is not c and x.user and x.user["id"] == uid]
+        for other in others:                     # ...and this one stays to hear the answer
+            other.supersede()
+        log(f"password changed: {u['username']}")
+        return {"t": "change_password", "ok": True, "token": token}
+
     def do_login_token(self, c, m):
         tok = m.get("token") or ""
         u = self.db.one("SELECT * FROM users WHERE token=?", (tok,))
         if not u:
             return {"t": "login_token", "ok": False, "err": "Session expired - please log in again"}
         c.login(u)
-        return {"t": "login_token", "ok": True, "token": tok, "user": {"id": u["id"], "name": u["username"]}}
+        return {"t": "login_token", "ok": True, "token": tok,
+                "user": {"id": u["id"], "name": u["username"]},
+                "staff": u["username"].lower() in staff_users(self.cfg)}
 
     # ---------------- rooms
     def room_json(self, rid, uid):
@@ -680,6 +776,131 @@ class Server:
         self.push_state(rid)
         return {"t": "set_perms", "ok": True}
 
+    # ------------------------------------------------------------ management console
+    def admin_rows(self, what):
+        """Everything the team is allowed to know about the players of this network.
+        It leaves the VPS only over the encrypted channel, and only to a process that
+        can make a stamp from the staff key."""
+        out = []
+        if what == "users":
+            for u in self.db.q("SELECT * FROM users ORDER BY username"):
+                mine = self.db.q("SELECT room_id FROM members WHERE user_id=?", (u["id"],))
+                used = sum(int(t["bytes"] or 0) for t in
+                           self.db.q("SELECT bytes FROM traffic WHERE user_id=?", (u["id"],)))
+                today = self.db.one("SELECT bytes FROM traffic WHERE user_id=? AND day=?",
+                                    (u["id"], time.strftime("%Y-%m-%d")))
+                out.append({"id": u["id"], "name": u["username"],
+                            "created": u["created"], "last": u["last"] or u["created"],
+                            "machine": (u["machine"] or "")[:12],
+                            "staff": u["username"].lower() in staff_users(self.cfg),
+                            "online": u["id"] in self.conns,
+                            "rooms": len(mine), "room_ids": sorted(r["room_id"] for r in mine),
+                            "bytes": used, "today": int(today["bytes"]) if today else 0})
+        elif what == "rooms":
+            for r in self.db.q("SELECT * FROM rooms ORDER BY id"):
+                mem = self.db.q("SELECT user_id, role FROM members WHERE room_id=?", (r["id"],))
+                owner = next((self.user_by_id(m["user_id"]) for m in mem if m["role"] == "owner"), None)
+                out.append({"id": r["id"], "name": r["name"], "limit": r["member_limit"],
+                            "created": r["created"],
+                            "owner": owner["username"] if owner else "?",
+                            "members": len(mem),
+                            "online": sum(1 for m in mem if m["user_id"] in self.conns)})
+        elif what == "traffic":
+            for t in self.db.q("SELECT user_id, day, bytes FROM traffic ORDER BY day DESC, bytes DESC"):
+                u = self.user_by_id(t["user_id"])
+                out.append({"id": t["user_id"], "name": u["username"] if u else "?",
+                            "day": t["day"], "bytes": int(t["bytes"] or 0)})
+        return out
+
+    def admin_text(self, what):
+        """The same facts, as lines for the console window."""
+        rows = self.admin_rows(what)
+        if what == "users":
+            head = f"{'name':<18}{'id':>5}{'made':>12}{'last seen':>12}{'machine':>14}"                    f"{'rooms':>7}{'online':>8}{'data':>10}  staff"
+            lines = [head, "-" * len(head)]
+            for r in rows:
+                lines.append(f"{r['name']:<18}{r['id']:>5}{stamp_day(r['created']):>12}"
+                             f"{stamp_day(r['last']):>12}{r['machine']:>14}{r['rooms']:>7}"
+                             f"{('yes' if r['online'] else '-'):>8}{human_bytes(r['bytes']):>10}"
+                             f"  {'ADMIN' if r['staff'] else ''}")
+            return "\n".join(lines)
+        if what == "rooms":
+            head = f"{'id':>4} {'name':<22}{'owner':<16}{'members':>9}{'online':>8}{'limit':>7}  made"
+            lines = [head, "-" * len(head)]
+            for r in rows:
+                lines.append(f"{r['id']:>4} {r['name']:<22}{r['owner']:<16}{r['members']:>9}"
+                             f"{r['online']:>8}{r['limit']:>7}  {stamp_day(r['created'])}")
+            return "\n".join(lines)
+        head = f"{'user':<18}{'day':<12}{'bytes':>10}"
+        lines = [head, "-" * len(head)]
+        for r in rows:
+            lines.append(f"{r['name']:<18}{r['day']:<12}{human_bytes(r['bytes']):>10}")
+        return "\n".join(lines)
+
+    def admin_staff(self, name, on):
+        """Vouch for a name, or stop vouching for it. The list lives in the server's own
+        config file, so no client and no copy of the source can add to it."""
+        cfg = load_cfg()
+        got = {str(x).lower() for x in (cfg.get("staff") or [])}
+        was = name.lower() in got
+        if on:
+            got.add(name.lower())
+        else:
+            got.discard(name.lower())
+        cfg["staff"] = sorted(got)
+        save_cfg(cfg)
+        self.cfg = cfg
+        if on and not was:
+            return f"{name} is management now: the app shows the admin panel to that account."
+        if was and not on:
+            return f"{name} is not management any more."
+        return f"{name} was already {'management' if on else 'not management'}."
+
+    def do_admin(self, c, m):
+        """The management console speaks here. The stamp is what says who: only a process
+        holding vlan42_staff.key can make one, so reading the source changes nothing.
+        An app that is also signed in as a player needs a second key: that account must be
+        one the team vouched for in the server's own config."""
+        if not staff_ok(m.get("stamp")):
+            return {"t": "admin", "ok": False, "err": "This is not the management console"}
+        if c.user and c.user["username"].lower() not in staff_users(self.cfg):
+            return {"t": "admin", "ok": False, "err": "This account is not management"}
+        words = (m.get("cmd") or "").split()
+        pair = bool(words) and words[0].lower() in ("set", "remove")
+        verb = " ".join(words[:2]).lower() if pair else (words[0].lower() if words else "")
+        arg = " ".join(words[2:] if pair else words[1:]).strip()
+        if verb in ("users", "rooms", "traffic"):
+            return {"t": "admin", "ok": True, "rows": self.admin_rows(verb),
+                    "out": self.admin_text(verb)}
+        if verb == "status":
+            n = self.db.q("SELECT COUNT(*) AS n FROM users")[0]["n"]
+            r = self.db.q("SELECT COUNT(*) AS n FROM rooms")[0]["n"]
+            return {"t": "admin", "ok": True,
+                    "out": f"{n} accounts, {r} rooms, {len(self.conns)} signed in now, "
+                           f"{len(self.udp_users)} moving game traffic"}
+        if verb in ("set admin", "remove admin") and arg:
+            u = self.user_by_name(arg)
+            if not u:
+                return {"t": "admin", "ok": False, "err": f"No user named {arg}"}
+            return {"t": "admin", "ok": True, "out": self.admin_staff(arg, verb == "set admin")}
+        if verb == "set limit" and arg:
+            words = arg.split()
+            if len(words) != 2 or not (words[0].isdigit() and words[1].isdigit()):
+                return {"t": "admin", "ok": False, "err": "Use: set limit <room id> <2-64>"}
+            rid, lim = int(words[0]), int(words[1])
+            room = self.db.one("SELECT * FROM rooms WHERE id=?", (rid,))
+            if not room:
+                return {"t": "admin", "ok": False, "err": f"No room with id {rid}"}
+            if not (2 <= lim <= 64):
+                return {"t": "admin", "ok": False, "err": "Member limit must be 2-64"}
+            if len(self.room_members(rid)) > lim:
+                return {"t": "admin", "ok": False, "err": "That room already has more members"}
+            self.db.run("UPDATE rooms SET member_limit=? WHERE id=?", (lim, rid))
+            self.push_state(rid)
+            return {"t": "admin", "ok": True,
+                    "out": f"Room {rid} ({room['name']}) now takes {lim} players"}
+        return {"t": "admin", "ok": False, "err": "Unknown command"}
+
     def do_room_state(self, c, m):
         """The room as it stands for the one asking - so a rule that just changed can be
         pulled at once instead of waiting for the next push."""
@@ -846,6 +1067,19 @@ class Server:
             if u and self.ep_users.get(u["ep"]) == uid:
                 del self.ep_users[u["ep"]]
 
+    def flush_tally(self):
+        """Write what the relay moved since the last sweep, per player per day. The panel
+        reads it back as data use; a player only ever sees their own line."""
+        with self.lock:
+            tally, self.tally = self.tally, {}
+        if not tally:
+            return
+        day = time.strftime("%Y-%m-%d")
+        for uid, n in tally.items():
+            self.db.run("INSERT INTO traffic(user_id,day,bytes) VALUES(?,?,?) "
+                        "ON CONFLICT(user_id,day) DO UPDATE SET bytes=bytes+excluded.bytes",
+                        (uid, day, int(n)))
+
     def udp_open(self):
         """Bind the relay socket, shouting and retrying if something holds the port."""
         while True:
@@ -908,6 +1142,7 @@ class Server:
             if not u:
                 return
             u["last"] = time.time()
+            self.tally[uid] = self.tally.get(uid, 0) + len(data)
             rid = struct.unpack("!I", data[4:8])[0]
             mode = data[8]
             c = self.conns.get(uid)
@@ -940,6 +1175,7 @@ class Server:
         while True:
             time.sleep(min(5.0, self.udp_timeout / 2.0))
             now = time.time()
+            self.flush_tally()
             expired = []
             with self.lock:
                 for uid, u in list(self.udp_users.items()):
@@ -1154,6 +1390,11 @@ class Conn:
                         log(f"{t}: {self.user['username']} from {self.addr[0]}")
                     self.send(r)
                     continue
+                if t == "admin" and not self.user:
+                    # the management console never signs in as a player: the stamp on the
+                    # command is its whole identity, so it is answered before the login gate
+                    self.send(s.do_admin(self, m))
+                    continue
                 if not self.user:
                     self.send({"t": t, "ok": False, "err": "Not logged in"})
                     continue
@@ -1193,6 +1434,8 @@ class Conn:
                     "remove_friend": lambda: s.do_remove_friend(self, m),
                     "pm": lambda: s.do_pm(self, m),
                     "invite": lambda: s.do_invite(self, m),
+                    "change_password": lambda: s.do_change_password(self, m),
+                    "admin": lambda: s.do_admin(self, m),
                 }
                 h = handlers.get(t)
                 try:
@@ -1263,13 +1506,134 @@ class Conn:
         return {"t": "chat", "ok": True}
 
 
+def stamp_day(t):
+    """A day, short enough for a column."""
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(float(t)))
+    except (TypeError, ValueError):
+        return "-"
+
+
+def human_bytes(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return ""
+
+
+def save_cfg(cfg):
+    try:
+        tmp = CFG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, CFG_FILE)
+    except OSError:
+        log("config: could not be written")
+
+
+class Console:
+    """The management console: `python vlan42_server.py set admin erfan`.
+
+    It speaks the same encrypted protocol as the player app, over loopback only, and it
+    carries no password - what makes it the team is a stamp that only a process able to
+    read vlan42_staff.key can make. So the source code may sit on a player's PC: without
+    that file on the VPS there is nothing in it to copy, and a stamp captured off the wire
+    is worth one minute."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.host, self.port = "127.0.0.1", int(cfg.get("tcp_port") or DEFAULT_TCP_PORT)
+        self.sock, self.aead, self.buf = None, None, b""
+
+    def send(self, obj):
+        raw = json.dumps(obj).encode()
+        n = secrets.token_bytes(12)
+        self.sock.sendall(base64.b64encode(n + self.aead.encrypt(n, raw, b"vlan42-ctl")) + b"\n")
+
+    def recv(self):
+        while True:
+            if b"\n" in self.buf:
+                line, self.buf = self.buf.split(b"\n", 1)
+                d = base64.b64decode(line)
+                return json.loads(self.aead.decrypt(d[:12], d[12:], b"vlan42-ctl"))
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                return None
+            self.buf += chunk
+
+    def run(self, words):
+        cmd = " ".join(words).strip() or "status"
+        try:
+            self.sock = socket.create_connection((self.host, self.port), timeout=8)
+        except OSError:
+            print(f"No V.Lan.42 server answers on {self.host}:{self.port}.")
+            return 1
+        try:
+            line = b""
+            while True:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    raise OSError("the server closed the door")
+                line += chunk
+                if b"\n" in line:
+                    break
+            hello = json.loads(line.split(b"\n", 1)[0])
+            eph = X25519PrivateKey.generate()
+            shared = eph.exchange(X25519PublicKey.from_public_bytes(bytes.fromhex(hello["pub"])))
+            self.aead = AESGCM(HKDF(algorithm=hashes.SHA256(), length=32,
+                                    salt=bytes.fromhex(hello["nonce"]),
+                                    info=b"vlan42-ctl").derive(shared))
+            # the key is not agreed yet, so this first line goes out in the open, as
+            # the player app sends it too
+            self.sock.sendall(json.dumps({"t": "auth1", "pub": eph.public_key().public_bytes(
+                Encoding.Raw, PublicFormat.Raw).hex()}).encode() + b"\n")
+            self.send({"t": "admin", "stamp": staff_stamp(), "cmd": cmd})
+            r = self.recv() or {}
+        finally:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        if not r.get("ok"):
+            print(r.get("err") or "The server refused that.")
+            return 1
+        print(r.get("out") or "Done.")
+        return 0
+
+
+HELP = """V.Lan.42 - the team's own commands (run them on the VPS, next to vlan42_server.py)
+
+  status                 what is running right now
+  users                  every account: made, last seen, its PC, its rooms, its data
+  rooms                  every room: owner, members, who is in it now
+  traffic                bytes the relay moved, per player per day
+  set admin <name>       let <name> see the management panel inside the app
+  remove admin <name>    take that right back
+  set limit <room> <n>   how many players room <room> may hold (2-64)
+  help                   this list
+
+Nothing here needs a password, and nothing here is in the player's copy of the app:
+the console proves itself with a stamp made from vlan42_staff.key, which lives only
+on this server. A stamp is worth one minute."""
+
+
 def main():
     cfg = load_cfg()
+    staff_key()                     # the management door exists from the first run onward
     if not os.path.exists(CFG_FILE):
         with open(CFG_FILE, "w", encoding="utf-8") as f:
             json.dump({"tcp_port": DEFAULT_TCP_PORT, "udp_port": DEFAULT_UDP_PORT}, f, indent=2)
+    words = sys.argv[1:]
+    if words and words[0].lower() in ("help", "-h", "--help"):
+        print(HELP)
+        return 0
+    if words:
+        return Console(cfg).run(words)
     Server(cfg).run()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

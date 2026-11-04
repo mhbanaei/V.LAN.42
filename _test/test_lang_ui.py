@@ -348,6 +348,54 @@ def main():
         app.awin.destroy()
         app.awin = None
 
+    # 5f. the team's own pages: the password card in Settings and the console table
+    app.staff = True
+    app.select_tab("settings")
+    settle(app)
+    leak = [t for t in shown(app.pg_settings, set()) if is_english(t)]
+    check("the password card and the console card speak Persian", not leak, str(leak[:4]))
+    rows_in = [{"id": 11, "name": "sara", "created": 1700000000.0, "last": 1700000600.0,
+                "machine": "0123456789ab", "rooms": 1, "online": True, "bytes": 4096,
+                "staff": False, "today": 4096},
+               {"id": 12, "name": "milad", "created": 1700000100.0, "last": 1700000900.0,
+                "machine": "1020304050607", "rooms": 0, "online": False, "bytes": 512,
+                "staff": True, "today": 512}]
+    app.link.admin_rows = rows_in
+    app.show_console()
+    tu.drain(app)                 # the table is only worth mirroring once its rows landed
+    settle(app)
+    app.mirror_t = 0
+    app.tick()                    # the tick that moves fresh rows to the Persian side
+    app.update_idletasks()
+    leak = [t for t in shown(app.cwin, set()) if is_english(t)]
+    check("the management console speaks Persian too", not leak, str(leak[:4]))
+    first = [c for c in app.con_body.winfo_children() if isinstance(c, vp.ctk.CTkFrame)][0]
+    xs = [c.winfo_x() for c in first.winfo_children() if isinstance(c, vp.Label)]
+    check("the Persian table reads from the right", xs and xs == sorted(xs, reverse=True), str(xs))
+    check("and mirroring left both rows standing",
+          len([c for c in app.con_body.winfo_children() if isinstance(c, vp.ctk.CTkFrame)]) == 2,
+          str(len(app.con_body.winfo_children())))
+    first = [c for c in app.con_body.winfo_children() if isinstance(c, vp.ctk.CTkFrame)][0]
+    slaves = app.cwin.pack_slaves()
+    check("the header stays above the rows after the turn",
+          slaves.index(app.con_head) < slaves.index(app.con_body._parent_frame),
+          str([type(k).__name__ for k in slaves]))
+    hd = [c for c in app.con_head.winfo_children() if isinstance(c, vp.Btn)]
+    cells = [c for c in first.winfo_children() if isinstance(c, vp.Label)]
+    hx = [c.winfo_x() for c in hd]
+    cx = [c.winfo_x() for c in cells]
+    check("the Persian header keeps the table's own columns",
+          hx == sorted(hx, reverse=True) and cx == sorted(cx, reverse=True)
+          and all(vp.has_rtl(str(b.cget("text"))) for b in hd),
+          f"{hx} / {cx}")
+    check("and its own count is said in Persian too",
+          vp.has_rtl(str(app.con_note.cget("text"))), str(app.con_note.cget("text")))
+    check("the console's note line reads from the right",
+          app.con_note.cget("anchor") == "e", str(app.con_note.cget("anchor")))
+
+    app.cwin.destroy()
+    app.cwin = None
+
     # 6. back to English: nothing is left behind
     fa_seen = managed(app)
     app.set_lang("English")

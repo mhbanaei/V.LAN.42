@@ -6,7 +6,9 @@
 The real window is built but kept invisible, so every tab, button and list row
 the player uses is created and clicked for real. Only the network is faked.
 """
-import ctypes, os, sys, time
+import base64, ctypes, os, sys, time
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -30,11 +32,20 @@ class FakeLink:
         self.delivered = True
         self.user = {"id": 7, "username": "042"}
         self.friends_payload = {"friends": [], "requests": []}
+        self.admin_rows = []          # what the management console is shown
+        self.admin_ok = True
+        self.pw = None                # what the server answers to a password change
 
     def req(self, t, **kw):
         self.sent.append((t, kw))
         if t == "friends":
             return {"t": t, "ok": True, **self.friends_payload}
+        if t == "admin":
+            if not self.admin_ok:
+                return {"t": t, "ok": False, "err": "This is not the management console"}
+            return {"t": t, "ok": True, "rows": list(self.admin_rows)}
+        if t == "change_password":
+            return dict(self.pw or {"t": t, "ok": True, "token": "a-brand-new-token"})
         if t == "my_rooms":
             return {"t": t, "ok": True, "rooms": []}
         if t == "search":
@@ -529,6 +540,208 @@ def main():
     check("a room IP is not scrubbed - the players need it",
           "10.77.0.12" in vp.mask_net("Your virtual IP: 10.77.0.12"),
           vp.mask_net("Your virtual IP: 10.77.0.12"))
+
+    # ------------------------------------------------- a player's own password
+    def pset(app, old="", new="", again=""):
+        for e, v in ((app.p_old, old), (app.p_new, new), (app.p_again, again)):
+            e.delete(0, "end")
+            if v:
+                e.insert(0, v)
+
+    app.select_tab("settings")
+    check("a signed-in account is offered the password card",
+          app.pwd_card.winfo_manager() == "pack", app.pwd_card.winfo_manager())
+    sent_before = len(app.link.sent)
+    pset(app)
+    app.b_pwd.invoke()
+    check("an empty form asks for the words instead of sending them",
+          len(app.link.sent) == sent_before and "Fill" in str(app.p_err.cget("text")),
+          str(app.p_err.cget("text")))
+    pset(app, "old-password", "new-password", "something else")
+    app.b_pwd.invoke()
+    check("two different new passwords are caught before the send",
+          len(app.link.sent) == sent_before and "not match" in str(app.p_err.cget("text")),
+          str(app.p_err.cget("text")))
+    cfg = vp.load_cfg()
+    cfg["token"] = "the old remember-me token"
+    vp.save_cfg(cfg)
+    app.link.pw = {"t": "change_password", "ok": False, "err": "Current password is wrong"}
+    pset(app, "bad", "goodpassword", "goodpassword")
+    app.b_pwd.invoke()
+    drain(app)
+    check("the server's no is shown in the card",
+          "Current password is wrong" in str(app.p_err.cget("text")), str(app.p_err.cget("text")))
+    check("and the saved session is left alone",
+          vp.load_cfg().get("token") == "the old remember-me token")
+    app.link.pw = {"t": "change_password", "ok": True, "token": "a-brand-new-token"}
+    pset(app, "my-old-password", "goodpassword", "goodpassword")
+    app.b_pwd.invoke()
+    drain(app)
+    check("the change is answered inside the card",
+          "changed" in str(app.p_err.cget("text")).lower() or "✓" in str(app.p_err.cget("text")),
+          str(app.p_err.cget("text")))
+    check("the three boxes are emptied",
+          not (app.p_old.get() or app.p_new.get() or app.p_again.get()))
+    check("the button is clickable again", str(app.b_pwd.cget("state")) == "normal")
+    check("remember-me carries on with the new password",
+          vp.load_cfg().get("token") == "a-brand-new-token", str(vp.load_cfg()))
+
+    # ------------------------------------------------- the team's own console
+    def find(w, cls, text=None, out=None):
+        out = [] if out is None else out
+        for c in w.winfo_children():
+            if isinstance(c, cls) and (text is None or str(c.cget("text")) == text):
+                out.append(c)
+            find(c, cls, text, out)
+        return out
+
+    def order(app, names):
+        return [t for t in labels(app.con_body) if t in names]
+
+    def rows(app):
+        return [c for c in app.con_body.winfo_children() if isinstance(c, ctk.CTkFrame)]
+
+    def flush(app, times=8):
+        """Let every worker answer land before the next click, the way tick() does."""
+        for _ in range(times):
+            time.sleep(0.03)
+            app.update_idletasks()
+            while not app.uq.empty():
+                app.on_event(app.uq.get_nowait())
+
+    NAMES3 = {"sara", "milad", "negar"}
+    USERS = [{"id": 11, "name": "sara", "created": 1700000000.0, "last": 1700000600.0,
+              "machine": "0123456789ab", "rooms": 2, "online": True, "bytes": 4096,
+              "staff": False, "today": 1024, "room_ids": [5, 9]},
+             {"id": 12, "name": "milad", "created": 1700000100.0, "last": 1700000900.0,
+              "machine": "1020304050607", "rooms": 1, "online": False, "bytes": 512,
+              "staff": True, "today": 512, "room_ids": [5]},
+             {"id": 13, "name": "negar", "created": 1700000200.0, "last": 1700000000.0,
+              "machine": "fedcba098765", "rooms": 0, "online": True, "bytes": 12288,
+              "staff": False, "today": 0, "room_ids": []}]
+    ROOMS = [{"id": 5, "name": "war room", "owner": "sara", "members": 2, "online": 1,
+              "limit": 16, "created": 1700000000.0},
+             {"id": 9, "name": "my room", "owner": "milad", "members": 1, "online": 1,
+              "limit": 4, "created": 1700000050.0}]
+    TRAFFIC = [{"id": 11, "name": "sara", "day": "2026-11-04", "bytes": 1024},
+               {"id": 12, "name": "milad", "day": "2026-11-03", "bytes": 512}]
+    app.link.admin_rows = USERS
+    app.staff = True
+    app.show_page("settings")
+    check("the console card appears only for an account the team vouched for",
+          app.team_card.winfo_manager() == "pack", app.team_card.winfo_manager())
+    app.staff = False
+    app.show_page("settings")
+    check("and a plain player never sees the way in", app.team_card.winfo_manager() == "")
+    app.staff = True
+    app.show_page("settings")
+    app.b_console.invoke()
+    flush(app)
+    check("the console opens on the user list",
+          app.cwin.winfo_exists() and app.con_view == "Users", str(app.con_view))
+    check("it asks the server, and carries a stamp with the ask",
+          any(t == "admin" and kw.get("cmd") == "users" and "stamp" in kw
+              for t, kw in app.link.sent), str(app.link.sent[-1]))
+    check("the rows are on the table", order(app, NAMES3) == ["milad", "negar", "sara"],
+          str(order(app, NAMES3)))
+    head = [c for c in app.con_head.winfo_children() if isinstance(c, vp.Btn)]
+    check("the header words sit over the columns they name",
+          [app.con_head.grid_columnconfigure(i)["minsize"] for i in range(len(head))]
+          == [rows(app)[0].grid_columnconfigure(i)["minsize"] for i in range(len(head))],
+          str([app.con_head.grid_columnconfigure(i)["minsize"] for i in range(len(head))]))
+    check("and the header is packed above the rows, not after them",
+          app.con_head in app.cwin.pack_slaves()
+          and app.cwin.pack_slaves().index(app.con_head)
+          < app.cwin.pack_slaves().index(app.con_body._parent_frame),
+          str([type(k).__name__ for k in app.cwin.pack_slaves()]))
+    check("a team row is marked as team", "★" in labels(app.con_body))
+    check("and an online one as online", "●" in labels(app.con_body))
+    check("the volume is readable, not a byte count", "4.0KB" in labels(app.con_body),
+          str(labels(app.con_body)))
+    check("every account can be moved into the team",
+          len(find(app.con_body, ctk.CTkButton, "Make team")) == 2
+          and len(find(app.con_body, ctk.CTkButton, "Remove from team")) == 1)
+    sara = next(f for f in rows(app) if "sara" in labels(f))
+    find(sara, ctk.CTkButton, "Make team")[0].invoke()
+    flush(app)
+    check("and clicking it says so to the server",
+          any(t == "admin" and kw.get("cmd") == "set admin sara" for t, kw in app.link.sent),
+          str(app.link.sent[-2:]))
+    app.console_sort("bytes")
+    check("a column header sorts the table", order(app, NAMES3) == ["milad", "sara", "negar"],
+          str(order(app, NAMES3)))
+    app.console_sort("bytes")
+    check("clicking it again turns the order around",
+          order(app, NAMES3) == ["negar", "sara", "milad"], str(order(app, NAMES3)))
+    app.con_find.delete(0, "end")
+    app.con_find.insert(0, "MIL")
+    app.console_draw()
+    check("and the search box narrows it", order(app, NAMES3) == ["milad"],
+          str(order(app, NAMES3)))
+    app.con_find.delete(0, "end")
+
+    app.link.admin_rows = ROOMS
+    app.set_admin_view("Rooms")
+    flush(app)
+    app.console_sort("id")
+    check("the room list is on the same table",
+          app.con_view == "Rooms" and "war room" in labels(app.con_body), str(labels(app.con_body)))
+    check("every room carries its own ceiling",
+          len(find(app.con_body, ctk.CTkEntry)) == len(ROOMS), str(len(find(app.con_body, ctk.CTkEntry))))
+    box = lambda: find(app.con_body, ctk.CTkEntry)[0]
+    check("the ceiling is typed in the row", box().get() == "16", box().get())
+    box().delete(0, "end")
+    box().insert(0, "7")
+    find(rows(app)[0], ctk.CTkButton, "Save")[0].invoke()
+    flush(app)
+    check("saving sends the new ceiling",
+          any(t == "admin" and kw.get("cmd") == "set limit 5 7" for t, kw in app.link.sent),
+          str(app.link.sent[-2:]))
+    sent_before, notes_before = len(app.link.sent), len(app.notes)
+    box().delete(0, "end")
+    box().insert(0, "nope")
+    find(rows(app)[0], ctk.CTkButton, "Save")[0].invoke()
+    flush(app)
+    check("a number that is not one is stopped at the door",
+          len(app.link.sent) == sent_before and len(app.notes) == notes_before + 1,
+          f"{len(app.link.sent) - sent_before} sent, {len(app.notes)} notes")
+
+    app.link.admin_rows = TRAFFIC
+    app.set_admin_view("Traffic")
+    flush(app)
+    check("the traffic view lists the days players moved data",
+          "2026-11-03" in labels(app.con_body) and "512B" in labels(app.con_body),
+          str(labels(app.con_body)))
+    app.link.admin_ok = False
+    app.set_admin_view("Users")
+    flush(app)
+    check("and a server that says no is answered in plain words",
+          "management console" in str(app.con_note.cget("text")), str(app.con_note.cget("text")))
+    app.link.admin_ok = True
+    app.cwin.destroy()
+    app.cwin = None
+
+    # the stamp is the whole identity of the console, so a player's copy must not make one
+    real_res = vp.res_path
+    key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_team.key")
+    try:
+        with open(key_file, "w", encoding="utf-8") as f:
+            f.write("0" * 64)
+        vp.res_path = lambda name: key_file if name == vp.STAFF_FILE else real_res(name)
+        got = vp.staff_stamp()
+        raw = base64.urlsafe_b64decode(got + "=" * (-len(got) % 4))
+        win = int(AESGCM(bytes.fromhex("0" * 64)).decrypt(raw[:12], raw[12:], vp.STAFF_AAD))
+        check("a PC with the team's key makes a stamp", bool(got) and abs(
+            win - int(time.time() // vp.STAFF_WINDOW)) <= 1, str(win))
+        vp.res_path = lambda name: None if name == vp.STAFF_FILE else real_res(name)
+        check("and a player's copy, which has no such file, makes nothing at all",
+              vp.staff_stamp() == "", repr(vp.staff_stamp()))
+    finally:
+        vp.res_path = real_res
+        try:
+            os.remove(key_file)
+        except OSError:
+            pass
 
     app.closing = True
     if app.hangf:
