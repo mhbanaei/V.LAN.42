@@ -128,14 +128,21 @@ What the mirror covers, because a word that is not moved is a word that disappea
   the scrollbar and the caption are left exactly where customtkinter put them;
 * grid columns *and* the column that stretches, so a mirrored row keeps its shape instead
   of opening a gap in the middle;
+* the **order** inside a packed column: `pack` puts anything it re-packs at the end of its
+  stack, so the mirror re-packs the whole group in the order the code used (`after=`
+  chaining) instead of moving one widget at a time;
 * log lines and system chat lines, which are plain text and are translated as they land -
   a player's own message is never rewritten;
 * Persian lines name the thing before its count (`عضو: ۲`, not `۲ عضو`), because Tk sends
   a number that opens a right-to-left line to the far end of it.
 
+A language switch rebuilds the lists it can (rooms, players, friends) *before* mirroring,
+never after: mirroring a widget that is about to be destroyed leaves customtkinter
+redrawing a canvas that is gone.
+
 Only the geometry managers this app uses itself are touched (`_box`/`_glass` in
-`vplan42.py`): a button's own label, an entry's own box and a segmented switch's own
-buttons belong to customtkinter and are never re-packed.
+`vplan42.py`): a button's own label, an entry's own box, a segmented switch's own buttons
+and a scroll list's own canvas and scrollbar belong to customtkinter and are never moved.
 
 ---
 
@@ -185,3 +192,9 @@ Run them one at a time - they share the config file and the test ports.
 * The control channel is X25519 → HKDF-SHA256 → AES-256-GCM. There is no TLS anywhere.
 * Room passwords and account passwords are never stored in the clear.
 * `vlan42_server.json` holds the invite key - treat it like a secret.
+* **The VPS address never reaches a player.** `mask_net()` scrubs every host, IP and port
+  the client knows (`learn_net()` collects them from `vlan42_servers.txt` and the built-in
+  list) out of every log line, error card and diagnostics report, replacing it with
+  "the network". Virtual room IPs (`10.77.0/16`) are left alone - those are the numbers
+  players put into their game, and a click on a player line copies one to the clipboard
+  and marks the line `Copied ✓`.

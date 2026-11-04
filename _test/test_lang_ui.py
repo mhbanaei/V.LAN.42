@@ -46,17 +46,35 @@ def halves(parent):
     return out
 
 
-def rail_rows(app):
-    return app.fr_rail.winfo_children()
+def friend_rows(app):
+    return [c for c in app.fr_body.winfo_children() if isinstance(c, vp.ctk.CTkFrame)]
 
 
-def rail_dot(app):
+def friend_dot(app):
     """The online dot of the last friend row, wherever that row was rebuilt to now."""
-    for c in reversed(rail_rows(app)):
+    for c in reversed(friend_rows(app)):
         for k in c.winfo_children():
             if isinstance(k, vp.Label) and str(k.cget("text")) == "●":
                 return k
     return None
+
+
+def vorder(w):
+    """The vertical order a column packs its children in, read off their positions - the
+    mirror has to keep it, because pack puts anything it re-packs at the end of the stack."""
+    out = []
+    for c in w.winfo_children():
+        if c.winfo_manager() == "pack":
+            out.append((c.winfo_y(), id(c)))
+    return [i for _, i in sorted(out)]
+
+
+def settle(app, times=4):
+    """Let Tk actually place everything, so a position read is a position and not a stale one."""
+    for _ in range(times):
+        app.update_idletasks()
+        app.update()
+        time.sleep(0.02)
 
 
 def placed(card):
@@ -114,6 +132,7 @@ def main():
             pass
 
     app = vp.App()
+    app.geometry("1100x720+30+30")
     app.update_idletasks()
 
     # signed in, so the landing page and its side menu are really on screen
@@ -146,7 +165,9 @@ def main():
           app.seg_lang.pack_info()["side"] == "left")
     app.select_tab("start")
 
+    settle(app)
     held = managed(app)          # English arrangement, before anything turns around
+    stood = vorder(side)         # and the order the landing menu packs its column in
     app.seg_lang.set("فارسی")
     app.set_lang(app.seg_lang.get())
     app.update_idletasks()
@@ -177,6 +198,9 @@ def main():
 
     # 4. Persian: the geometry, mirrored for real
     check("the side menu moved to the right edge", side.pack_info()["side"] == "right")
+    settle(app)
+    check("the menu keeps its column order in Persian", vorder(side) == stood,
+          f"{len(vorder(side))} vs {len(stood)}")
     check("the wordmark now reads the 42 picture then VLAN",
           word["42"].pack_info()["side"] == "right" and word["42"].pack_info()["padx"] == (0, 6),
           str(word["42"].pack_info()))
@@ -231,15 +255,20 @@ def main():
           rr["frame"].winfo_manager() == "pack" and rr["name"].winfo_ismapped(),
           str((rr["frame"].winfo_manager(), rr["name"].winfo_ismapped())))
 
-    # 5. rows built after the switch are mirrored too, without closing anything
+    # 5. rows built after the switch are mirrored too, without closing anything.
+    #    Friends live on their own tab only - the landing menu keeps no list of them.
+    check("the landing menu carries no friend list",
+          not hasattr(app, "fr_rail") and not hasattr(app, "rail_rows"))
     app.link.friends_payload = {"friends": [{"name": "sara", "online": True},
                                             {"name": "milad", "online": False}], "requests": []}
     app.friends = {"friends": app.link.friends_payload["friends"], "requests": []}
+    app.select_tab("friends")
     app.rebuild_friends()
     app.mirror_t = 0
     app.tick()
-    dot = rail_dot(app)
-    check("two friend rows stand in the side menu", len(rail_rows(app)) == 2, str(rail_rows(app)))
+    dot = friend_dot(app)
+    check("two friend rows stand on the Friends page", len(friend_rows(app)) == 2,
+          str(friend_rows(app)))
     check("a friend row built after the switch is mirrored by the next tick",
           dot is not None and dot.pack_info()["side"] == "right",
           str(dot.pack_info()) if dot else "no row")
@@ -328,8 +357,8 @@ def main():
     check("the wordmark reads left to right again",
           word["42"].pack_info()["side"] == "left" and word["42"].pack_info()["padx"] == (6, 0))
     check("the late friend rows turn back too",
-          rail_dot(app) is not None and rail_dot(app).pack_info()["side"] == "left",
-          str(rail_dot(app).pack_info()) if rail_dot(app) else "no row")
+          friend_dot(app) is not None and friend_dot(app).pack_info()["side"] == "left",
+          str(friend_dot(app).pack_info()) if friend_dot(app) else "no row")
     check("the player cards lead from the left again",
           app.rows[8][4].pack_info()["side"] == "left", str(app.rows[8][4].pack_info()))
     check("justify follows back", tag.cget("justify") == "left")
@@ -339,6 +368,9 @@ def main():
           str(pens(app.pg_start)))
     app.layout_notes()
     check("the notice returns to the right corner", placed(note) == (1.0, "se"), str(placed(note)))
+    settle(app)
+    check("the menu keeps its column order in English too", vorder(side) == stood,
+          f"{len(vorder(side))} vs {len(stood)}")
     check("the config file says English", vp.load_cfg().get("lang") == "en")
 
     app.drop_note(note)

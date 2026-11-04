@@ -188,9 +188,11 @@ def main():
         except OSError as ex:
             msg = str(ex)
             node_c.stop()
-        check("the error names the relay", "relay" in msg and HOST in msg, msg)
-        check("the error names the port", str(PORT) in msg, msg)
-        check("the error points at the checker tool", "vlan42_check.py" in msg, msg)
+        check("the error names the relay", "relay" in msg and "UDP" in msg, msg)
+        # the address and port of the network are the team's, never a player's screen
+        check("and the error hides where the network lives",
+              HOST not in msg and str(PORT) not in msg, msg)
+        check("the error still points at the checker tool", "vlan42_check.py" in msg, msg)
 
         # --- a refused session (stale token) must not look like a blocked port
         node_d, _ = make_node(d, room)

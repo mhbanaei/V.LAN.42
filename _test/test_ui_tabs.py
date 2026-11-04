@@ -361,10 +361,16 @@ def main():
     app.copy_peer_ip(8)
     check("clicking a player copies his virtual IP", app.clipboard_get() == "10.77.0.2",
           repr(app.clipboard_get()))
+    check("the copied line marks itself", str(app.rows[8][2].cget("text")) == "Copied ✓",
+          repr(str(app.rows[8][2].cget("text"))))
     drain(app)
     app.tick()
     check("the copy is said out loud", "10.77.0.2 copied" in app.logbox.get("1.0", "end"),
           app.logbox.get("1.0", "end")[-90:])
+    n.room["members"] = list(n.room["members"])       # same roster, so no row is rebuilt
+    app.update_room(n)
+    check("and the mark hands the IP back on the next word",
+          str(app.rows[8][2].cget("text")) == "10.77.0.2", repr(str(app.rows[8][2].cget("text"))))
 
     # 11d. one person standing inside is still a room attached to the server
     members, peers = list(n.room["members"]), dict(n.peers)
@@ -454,6 +460,60 @@ def main():
     check("logout clears threads and unread", app.pms == {} and app.pm_unread == {}
           and app.sel_friend is None)
     check("logout clears the badge", app.tabs["friends"][2].winfo_manager() == "")
+
+    # 15. lists read top to bottom by name, and nothing a player can read repeats
+    #     the address of the network itself
+    app.link = FakeLink()
+    names = ["zed", "042", "milad", "aria"]
+    n2 = FakeNode()
+    n2.srv_rtt = 21
+    n2.room["members"] = [{"id": i + 10, "name": nm, "role": "member", "online": True,
+                           "vip": f"10.77.0.{i + 10}"} for i, nm in enumerate(names)]
+    n2.room["invite"] = ""
+    app.node, app.room_name = n2, "war room"
+    app.role_key = None
+    app.update_room(n2)
+    seen = [str(row[1].cget("text")) for row in app.rows.values()]   # built in list order
+    check("players line up by name, top to bottom",
+          seen == sorted(names, key=str.lower), str(seen))
+    app.link.friends_payload = {"friends": [{"name": nm, "online": True} for nm in names],
+                                "requests": []}
+    app.friends = {"friends": app.link.friends_payload["friends"], "requests": []}
+    app.rebuild_friends()
+    check("friends line up by name too",
+          [t.split()[0] for t in labels(app.fr_body) if t.split()[0] in names]
+          == sorted(names, key=str.lower), str(labels(app.fr_body)))
+
+    # the invite code: the button copies, says so, and the live room state supplies it
+    n2.room["invite"] = "QQQQ.WWWW.EEEE.RRRR"
+    app.invite_text = ""
+    app.update_room(n2)
+    check("the room state hands the invite code to the button", app.invite_text == "QQQQ.WWWW.EEEE.RRRR",
+          repr(app.invite_text))
+    app.b_inv.invoke()
+    check("and pressing it copies the code", app.clipboard_get() == "QQQQ.WWWW.EEEE.RRRR",
+          repr(app.clipboard_get()))
+    check("and the button says copied", str(app.b_inv.cget("text")) == "Copied ✓",
+          repr(str(app.b_inv.cget("text"))))
+
+    # the VPS address is the team's: no log line, error or report carries it
+    vp.learn_net()
+    addr = vp.VpsLink("203.0.113.10", 4242, lambda s: None)
+    app.q_put(f"Connecting to {addr.host}:{addr.port} timed out")
+    app.q_put("UDP relay ready (203.0.113.10)")
+    app.err = vp.mask_net("Could not start: Connecting to v42.ir:4242 timed out after 12s")
+    drain(app)
+    app.tick()
+    log = app.logbox.get("1.0", "end")
+    check("no log line carries the server address",
+          "203.0.113.10" not in log and "v42.ir" not in log and "4242" not in log, log[-140:])
+    check("and the masked line still says what happened",
+          "timed out" in log and "the network" in log, log[-140:])
+    check("an error line is scrubbed too",
+          "v42.ir" not in app.err and "4242" not in app.err, repr(app.err))
+    check("a room IP is not scrubbed - the players need it",
+          "10.77.0.12" in vp.mask_net("Your virtual IP: 10.77.0.12"),
+          vp.mask_net("Your virtual IP: 10.77.0.12"))
 
     app.closing = True
     if app.hangf:
