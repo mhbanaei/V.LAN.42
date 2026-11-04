@@ -32,6 +32,12 @@ if exist V.Lan.42.ico (
 )
 
 set EXTRA=
+if exist text.mp3 (
+    set DATA=%DATA% --add-data "text.mp3;."
+    echo text.mp3 found - it becomes the sound a friend's message makes.
+) else (
+    echo NOTE: no text.mp3 here - the app will use the Windows ding for messages too.
+)
 if exist wintun.dll (
     set EXTRA=--add-binary "wintun.dll;."
     echo wintun.dll found - it will be bundled into the exe.

@@ -32,12 +32,17 @@ try:
     import winsound
 except ImportError:
     winsound = None
+try:
+    winmm = ctypes.windll.winmm      # mci plays an mp3 with nothing extra installed
+except Exception:
+    winmm = None
 
 APP_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 CFG_FILE = os.path.join(APP_DIR, "vlan42.json")
 IFACE = "V-Lan-42"
 APP_NAME = "V LAN 42"
 LOGO_FILE = "V.Lan.42.ico"
+SND_FILE = "text.mp3"                # the sound a friend's message makes
 GITHUB_URL = "https://github.com/mhbanaei"
 REYMIT_URL = "https://reymit.ir/42level"     # the team's support page: it pays for the servers
 DEFAULT_PORT = 4242
@@ -82,6 +87,21 @@ def res_path(name):
             if os.path.isfile(p):
                 return p
     return None
+
+
+def play_file(path):
+    """One short sound through the media player Windows already has. The alias is closed
+    first so a second message does not fail on a stream still held open."""
+    if not (path and winmm):
+        return False
+    try:
+        winmm.mciSendStringW("close v42snd", None, 0, None)
+        if winmm.mciSendStringW(f'open "{path}" alias v42snd', None, 0, None):
+            return False
+        winmm.mciSendStringW("play v42snd", None, 0, None)
+        return True
+    except Exception:
+        return False
 
 
 def load_cfg():
@@ -2138,7 +2158,7 @@ class App(ctk.CTk):
         self.jwin = None                # join-request panel
         self.jreq, self.jreq_n = [], 0  # who knocked on the room door
         self.await_enter = None         # room id we are waiting to be let into
-        self.notes = []                 # live in-app notification cards
+        self.hint_live, self.hint_t = False, 0     # the one notice line above the page
         self.rooms_t = 0.0
         self.entering_rid = None
         self.tab = None                  # the tab the player opened
@@ -2162,6 +2182,7 @@ class App(ctk.CTk):
         self.build_logs()
         self.build_room()
         self.build_settings()
+        self.build_hint()
         self.pages = {"login": self.pg_login, "start": self.pg_start, "friends": self.pg_friends,
                       "logs": self.pg_logs, "room": self.pg_room, "settings": self.pg_settings}
         self.show_page("login")
@@ -2367,82 +2388,74 @@ class App(ctk.CTk):
         self.after(700, self.blink_tick)
 
     # ------------------------------------------------------------ in-app notifications
+    def build_hint(self):
+        """The one line a notice lands in: above the page it belongs to, never a card
+        floating over the window. The tab keeps its badge, so nothing is lost when the
+        line fades away."""
+        self.hint = ctk.CTkFrame(self, fg_color=CARD, corner_radius=0,
+                                 border_width=1, border_color=ACC, height=40)
+        self.hint.pack_propagate(False)
+        self.hint_inner = ctk.CTkFrame(self.hint, fg_color="transparent")
+        self.hint_inner.pack(fill="both", expand=True, padx=16, pady=5)
+        self.hint.pack_forget()
+
     def notify(self, title, text, actions=None, keep=14):
-        """A card inside the window - no new form to chase, and the buttons work from
-        wherever you are. actions is a list of (label, command(card), color)."""
+        """actions is a list of (label, command, color); the buttons answer from wherever
+        you are and then the line steps back out of the way."""
         if not self.winfo_exists():
             return
-        card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=12,
-                            border_width=1, border_color=ACC)
-        Label(card, text=title, font=(FONT, 13, "bold"), text_color=ACC,
-                     anchor="w").pack(fill="x", padx=14, pady=(10, 0))
-        Label(card, text=text, font=(FONT, 12), text_color=TXT, anchor="w",
-                     wraplength=270, justify="left").pack(fill="x", padx=14, pady=(2, 6))
-        row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="x", padx=12, pady=(0, 10))
+        for c in self.hint_inner.winfo_children():
+            c.destroy()
         for label, cmd, color in (actions or []):
-            self.btn(row, label, lambda c=card, fn=cmd: fn(c), color, CARD2,
-                     h=30, width=78).pack(side="right", padx=3)
-        self.notes.insert(0, [card, keep])
-        self.layout_notes()
+            self.btn(self.hint_inner, label, lambda fn=cmd: self.answer_hint(fn),
+                     color, CARD2, h=28, width=78).pack(side="right", padx=3)
+        Label(self.hint_inner, text=title, font=(FONT, 12, "bold"),
+                     text_color=ACC).pack(side="left")
+        Label(self.hint_inner, text=text, font=(FONT, 12), text_color=TXT).pack(
+            side="left", padx=(9, 0))
+        self.hint_t = keep
+        self.show_hint()
         self.beep()
-        return card
+        return self.hint
 
-    def layout_notes(self):
-        """Stack the live cards in the bottom corner of the window - whichever corner
-        the language is read from. They place themselves, so the mirror leaves them be."""
-        y = 12
-        right = LANG[0] != "fa"
-        for entry in self.notes:
-            card = entry[0]
-            if not card.winfo_exists():
-                continue
-            card.__dict__["_nomirror"] = True
-            card.place(relx=1.0 if right else 0.0, rely=1.0,
-                       anchor="se" if right else "sw", x=-12 if right else 12, y=-y)
-            self.update_idletasks()
-            y += card.winfo_reqheight() + 8
+    def show_hint(self):
+        self.hint.pack(fill="x", side="top", before=self.body)
+        if not self.hint_live:
+            self.hint_live = True
+            self.after(1000, self.tick_hint)
 
-    def tick_notes(self):
-        for entry in list(self.notes):
-            entry[1] -= 1
-            if entry[1] <= 0:
-                self.drop_note(entry[0])
-        self.layout_notes()
-        if self.notes:
-            self.after(1000, self.tick_notes)
+    def hide_hint(self):
+        self.hint_live, self.hint_t = False, 0
+        if self.hint.winfo_manager() == "pack":
+            self.hint.pack_forget()
 
-    def drop_note(self, card):
-        for entry in list(self.notes):
-            if entry[0] is card:
-                self.notes.remove(entry)
-        try:
-            card.destroy()
-        except Exception:
-            pass
-        self.layout_notes()
+    def tick_hint(self):
+        if not self.hint_live:
+            return
+        self.hint_t -= 1
+        if self.hint_t <= 0:
+            return self.hide_hint()
+        self.after(1000, self.tick_hint)
+
+    def answer_hint(self, fn):
+        self.hide_hint()
+        fn()
 
     def note_friend_req(self, name):
-        """A friend request is an accept/decline card, not a page you must find."""
+        """A friend request is answered from the line itself - or later on the Friends page,
+        where the same two buttons wait as long as you need them."""
         self.notify("Friend request", fmt("{name} wants to be your friend.", name=name), [
-            ("✕", lambda c: self.answer_req(name, False, c), CARD2),
-            ("Accept", lambda c: self.answer_req(name, True, c), ACC)])
-        self.start_notes()
+            ("✕", lambda: self.answer_req(name, False), CARD2),
+            ("Accept", lambda: self.answer_req(name, True), ACC)])
 
-    def answer_req(self, name, accept, card):
+    def answer_req(self, name, accept):
         self.friend_req(name, "friend_resp", accept=accept)
-        self.drop_note(card)
-
-    def start_notes(self):
-        if len(self.notes) == 1:
-            self.after(1000, self.tick_notes)
 
     def note_pm(self, name, text):
         if self.page == "friends":
             return
         self.notify("Message", f"{name}: {text[:70]}",
-                    [("Open", lambda c: self.open_pm_from_note(name), ACC)])
-        self.start_notes()
+                    [("Open", lambda: self.open_pm_from_note(name), ACC)])
 
     def open_pm_from_note(self, name):
         self.select_tab("friends")
@@ -2450,15 +2463,13 @@ class App(ctk.CTk):
 
     # ------------------------------------------------------------ the host answers the door
     def note_join_req(self, rq):
-        """A guest knocked. The card answers from wherever the player happens to be."""
+        """A guest knocked: answered from the line above the page, or from the Room tab's
+        own list while the badge on it still counts."""
         self.notify("Join request", fmt("{name} wants to join the room.", name=rq["name"]), [
-            ("✕", lambda c: self.answer_join(rq, False, c), CARD2),
-            ("Accept", lambda c: self.answer_join(rq, True, c), ACC)])
-        self.start_notes()
+            ("✕", lambda: self.answer_join(rq, False), CARD2),
+            ("Accept", lambda: self.answer_join(rq, True), ACC)])
 
-    def answer_join(self, rq, accept, card=None):
-        if card is not None:
-            self.drop_note(card)
+    def answer_join(self, rq, accept):
         if not (self.link and self.link.alive):
             return
 
@@ -2822,7 +2833,8 @@ class App(ctk.CTk):
                              selected_hover_color=ACC_H, unselected_color=CARD2, text_color=TXT)
         self.seg_sound.pack(side="left")
         self.seg_sound.set("Off" if not SOUND[0] else "On")
-        self.btn(srow, "Test sound", self.beep, CARD2, LINE, h=34, width=100).pack(side="left", padx=(14, 0))
+        self.btn(srow, "Test sound", lambda: self.beep(pm=True), CARD2, LINE,
+                 h=34, width=100).pack(side="left", padx=(14, 0))
 
         self.pwd_card = ctk.CTkFrame(self.set_body, fg_color=CARD, corner_radius=14,
                                      border_width=1, border_color=LINE)
@@ -2918,7 +2930,7 @@ class App(ctk.CTk):
         cfg["sound"] = SOUND[0]
         save_cfg(cfg)
         if SOUND[0]:
-            self.beep()
+            self.beep(pm=True)
 
     # ------------------------------------------------------------ both languages
     def mirror_all(self, rtl):
@@ -2991,7 +3003,10 @@ class App(ctk.CTk):
         if name == "login":
             self.nav.pack_forget()
         else:
-            self.nav.pack(fill="x", side="top", before=self.body)
+            # the tabs stay the first thing under the title bar: a live notice line goes
+            # between them and the page, never above the menu
+            ref = self.hint if self.hint.winfo_manager() == "pack" else self.body
+            self.nav.pack(fill="x", side="top", before=ref)
         self.body.pack(fill="both", expand=True)
         if name == "room":
             role = (self.node.room.get("my_role") if self.node else None) or "member"
@@ -3082,12 +3097,7 @@ class App(ctk.CTk):
         self.pms, self.pm_unread, self.sel_friend = {}, {}, None
         self.friends = {"friends": [], "requests": []}
         self.rebuild_friends()
-        for entry in list(self.notes):
-            try:
-                entry[0].destroy()
-            except Exception:
-                pass
-        self.notes = []
+        self.hide_hint()
         for w in (self.awin, self.jwin, self.cwin):
             if w:
                 try:
@@ -4147,13 +4157,14 @@ class App(ctk.CTk):
         self.pms.setdefault(name, []).append((who, text, ts))
         if name == self.sel_friend and self.page == "friends":
             self.chat_add(who, text, "me" if mine else "them", ts, box=self.pm_box)
-            self.beep()
+            if not mine:
+                self.beep(pm=True)
             return
         if not mine:            # nobody is looking at it: count it on the tab and on the row
             self.pm_unread[name] = self.pm_unread.get(name, 0) + 1
             self.rebuild_friends()
             self.note_pm(name, text)
-            self.beep()
+            self.beep(pm=True)
 
     def send_pm(self):
         txt, name = self.pm_in.value(), self.sel_friend
@@ -4177,9 +4188,15 @@ class App(ctk.CTk):
         except Exception:
             return False
 
-    def beep(self):
-        """The chat ding rings for the app you are looking at - never over a game."""
-        if winsound and self.focused():
+    def beep(self, pm=False):
+        """The chat sound rings for the app you are looking at - never over a game, and
+        never at all when the message sound is off. A friend's words get the team's own
+        sound file; anything else keeps the system ding."""
+        if not SOUND[0] or not self.focused():
+            return
+        if pm and play_file(res_path(SND_FILE)):
+            return
+        if winsound:
             try:
                 winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS)
             except Exception:
@@ -4481,7 +4498,6 @@ class App(ctk.CTk):
             self.q_put(ev.get("msg") or "The host must approve you before you can enter")
             self.notify("Join request", fmt("Waiting for the host of {room}", room=ev.get("name") or ""),
                         keep=30)
-            self.start_notes()
         elif t == "join_ok":
             self.q_put(fmt("{who} let you into {room}", who=ev.get("by", "?"),
                            room=ev.get("name", "")))

@@ -77,11 +77,6 @@ def settle(app, times=4):
         time.sleep(0.02)
 
 
-def placed(card):
-    info = card.place_info()
-    return float(info["relx"]), info["anchor"]
-
-
 def pen(w):
     """The font family one widget was actually handed."""
     try:
@@ -153,9 +148,14 @@ def main():
           and word["42"].pack_info()["padx"] == (6, 0), str(word["42"].pack_info()))
     check("the big mark in the menu is not followed by a second 42",
           "42" not in tu.labels(side) and "VLAN" in tu.labels(side), str(tu.labels(side)[:6]))
-    note = app.notify("Test", "hello")
-    app.layout_notes()
-    check("a notice lands bottom-right in English", placed(note) == (1.0, "se"), str(placed(note)))
+    app.notify("Test", "hello")
+    settle(app)
+    check("a notice is a line above the page, not a card over it",
+          app.hint.winfo_manager() == "pack" and app.hint.winfo_y() < app.body.winfo_y(),
+          f"{app.hint.winfo_y()} vs {app.body.winfo_y()}")
+    check("and its words start from the left in English",
+          app.hint_inner.winfo_children()[-1].pack_info()["side"] == "left",
+          str(app.hint_inner.winfo_children()[-1].pack_info()))
 
     # 2. the language control is a real setting, not a decoration
     app.select_tab("settings")
@@ -210,8 +210,12 @@ def main():
     check("the space that followed a word now precedes it",
           app.lbl_acct_name.pack_info()["padx"] == (0, 7), str(app.lbl_acct_name.pack_info()["padx"]))
     check("Persian text is right-justified", tag.cget("justify") == "right", tag.cget("justify"))
-    app.layout_notes()
-    check("a notice lands bottom-left in Persian", placed(note) == (0.0, "sw"), str(placed(note)))
+    check("a notice stays above the page in Persian too",
+          app.hint.winfo_manager() == "pack" and app.hint.winfo_y() < app.body.winfo_y(),
+          f"{app.hint.winfo_y()} vs {app.body.winfo_y()}")
+    check("and its words turn to the right",
+          app.hint_inner.winfo_children()[-1].pack_info()["side"] == "right",
+          str(app.hint_inner.winfo_children()[-1].pack_info()))
     app.select_tab("settings")
     check("a page that was hidden turns around when it appears",
           app.seg_lang.pack_info()["side"] == "right")
@@ -423,14 +427,15 @@ def main():
           vp.FONT == vp.FONT_EN and pen(tag) == vp.FONT_EN, f"{vp.FONT} / {pen(tag)}")
     check("no widget is left in the Persian font", pens(app.pg_start) == {vp.FONT_EN},
           str(pens(app.pg_start)))
-    app.layout_notes()
-    check("the notice returns to the right corner", placed(note) == (1.0, "se"), str(placed(note)))
+    check("the notice line keeps its words on the left in English",
+          app.hint_inner.winfo_children()[-1].pack_info()["side"] == "left",
+          str(app.hint_inner.winfo_children()[-1].pack_info()))
     settle(app)
     check("the menu keeps its column order in English too", vorder(side) == stood,
           f"{len(vorder(side))} vs {len(stood)}")
     check("the config file says English", vp.load_cfg().get("lang") == "en")
 
-    app.drop_note(note)
+    app.hide_hint()
     app.closing = True
     if app.hangf:
         app.hangf.close()

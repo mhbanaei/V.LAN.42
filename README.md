@@ -108,7 +108,9 @@ Inside the app:
   **3 rooms per account**. Create a room by typing its name and pressing the dice for the
   password; the password is 32 characters from the operating system's entropy pool.
 * **Friends** - search by username, send a request, accept or ignore, open a private
-  thread. A request or a message updates both sides the moment it lands.
+  thread. A request or a message updates both sides the moment it lands, and a friend's
+  words are heard as well: the message sound is `text.mp3` next to the app (bundled in the
+  exe), and Settings → *Message sound* turns it off - off really means silence.
 * **Room** - appears in the tab bar only while you are inside one. One clean card per
   player: status dot, name, their ping, and clicking the card copies their virtual IP.
   The room stays attached to the server even when you are the only one inside.
@@ -121,6 +123,12 @@ Inside the app:
 
 The name of the app is drawn once, in the top bar; a page header only says where you are
 and thanks the people whose support pays for the servers - `reymit.ir/42level`, clickable.
+
+Nothing pops up over the window. A notice - a friend request, a message while you are on
+another page, a guest knocking, an invite waiting on the host - is one thin line directly
+under the tab bar, on the side the language is read from, with its own buttons when there
+is something to answer. The tab it belongs to keeps its red number, so the news is still
+there after the line fades.
 
 A room does not die with its host. When the owner leaves, ownership moves to the
 longest-serving admin and, if there is none, to any other member - so the room and its
@@ -173,14 +181,14 @@ inside it is the same sealed token.
 ## Languages
 
 The Settings tab switches the whole interface between English and Persian: the words are
-translated, the layout mirrors (left becomes right), notices move to the other corner,
-and Persian text is drawn in **Vazir** (falling back through `Vazirmatn`, `Vazir FD`,
+translated, the layout mirrors (left becomes right), the notice line reads from the other
+side, and Persian text is drawn in **Vazir** (falling back through `Vazirmatn`, `Vazir FD`,
 `Noto Sans Arabic`, `Tahoma` - whatever is installed). The choice is remembered.
 
 What the mirror covers, because a word that is not moved is a word that disappears:
 
 * every page (including the Settings password card), every floating panel (admin, invite,
-  the management console) and every notice card;
+  the management console) and the notice line under the tabs;
 * rows built *after* the switch - room rows, player cards, friend rows, a console table
   redrawn while it is open - caught by the slow pass in `tick()`;
 * the inside of scroll lists (Rooms, Players, Friends, Admin panel, the console's tables):
@@ -213,8 +221,9 @@ and a scroll list's own canvas and scrollbar belong to customtkinter and are nev
 build_exe.bat
 ```
 
-Installs `pyinstaller customtkinter cryptography pillow`, bundles `V.Lan.42.ico`
-(and `wintun.dll` if present) and produces a single **`dist\V.Lan.42.exe`**. Ship that
+Installs `pyinstaller customtkinter cryptography pillow`, bundles `V.Lan.42.ico`,
+`text.mp3` and `wintun.dll` (each one only if it is next to the script) and produces a
+single **`dist\V.Lan.42.exe`**. Ship that
 file next to your `vlan42_servers.txt` if you change the addresses.
 
 ## Before you push

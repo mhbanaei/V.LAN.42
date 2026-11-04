@@ -433,6 +433,41 @@ def main():
     app.note_typing()
     check("room typing goes out while inside a room", ("typing", {}) in app.link.sent,
           str(app.link.sent[-3:]))
+
+    # ---- the sound a friend's message makes, and how big a notice may be
+    heard = []
+    real_play, real_ws, real_focus, real_sound = vp.play_file, vp.winsound, app.focused, vp.SOUND[0]
+    vp.play_file = lambda p: (heard.append(p), True)[1]
+    vp.winsound = type("W", (), {"SND_ALIAS": 1, "SND_ASYNC": 1,
+                                 "PlaySound": lambda *a: heard.append("ding")})
+    app.focused = lambda: True
+    vp.SOUND[0] = True
+    app.sel_friend = None
+    app.pm_add("sara", "sara", "are you in?", ts=time.time())
+    check("a friend's message plays the message sound",
+          bool(heard) and str(heard[-1]).endswith(vp.SND_FILE), str(heard))
+    heard.clear()
+    app.pm_add("sara", "You", "yes", ts=time.time(), mine=True)
+    check("your own words do not ring back at you", heard == [], str(heard))
+    heard.clear()
+    app.notify("Join request", "Waiting for the host of home")
+    app.update_idletasks()
+    check("any other notice keeps the plain ding", heard == ["ding"], str(heard))
+    check("and a notice is one thin line, not a panel",
+          app.hint.winfo_manager() == "pack" and app.hint.winfo_height() <= 44,
+          str(app.hint.winfo_height()))
+    check("it sits above the page instead of over it",
+          app.nav.winfo_y() < app.hint.winfo_y() < app.body.winfo_y(),
+          f"{app.nav.winfo_y()} / {app.hint.winfo_y()} / {app.body.winfo_y()}")
+    check("the line says what it is, then the news",
+          labels(app.hint)[:2] == ["Join request", "Waiting for the host of home"],
+          str(labels(app.hint)[:3]))
+    heard.clear()
+    vp.SOUND[0] = False
+    app.pm_add("milad", "milad", "hello?", ts=time.time())
+    check("Message sound Off means silence", heard == [], str(heard))
+    vp.play_file, vp.winsound, app.focused, vp.SOUND[0] = real_play, real_ws, real_focus, real_sound
+    app.hide_hint()
     sent_room = app.link.sent.count(("typing", {}))
     app.node = None
     app.tick()
@@ -729,14 +764,15 @@ def main():
     check("saving sends the new ceiling",
           any(t == "admin" and kw.get("cmd") == "set limit 5 7" for t, kw in app.link.sent),
           str(app.link.sent[-2:]))
-    sent_before, notes_before = len(app.link.sent), len(app.notes)
+    sent_before = len(app.link.sent)
     box().delete(0, "end")
     box().insert(0, "nope")
     find(rows(app)[0], ctk.CTkButton, "Save")[0].invoke()
     flush(app)
     check("a number that is not one is stopped at the door",
-          len(app.link.sent) == sent_before and len(app.notes) == notes_before + 1,
-          f"{len(app.link.sent) - sent_before} sent, {len(app.notes)} notes")
+          len(app.link.sent) == sent_before and app.hint.winfo_manager() == "pack"
+          and "2 to 64" in " ".join(labels(app.hint)), str(labels(app.hint)))
+    app.hide_hint()
 
     app.link.admin_rows = TRAFFIC
     app.set_admin_view("Traffic")

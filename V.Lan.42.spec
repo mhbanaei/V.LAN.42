@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('V.Lan.42.ico', '.'), ('vlan42_servers.txt', '.')]
+datas = [('V.Lan.42.ico', '.'), ('vlan42_servers.txt', '.'), ('text.mp3', '.')]
 binaries = [('wintun.dll', '.')]
 hiddenimports = []
 tmp_ret = collect_all('customtkinter')
