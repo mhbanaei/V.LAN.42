@@ -1,0 +1,6 @@
+# V.Lan.42 - managed VPS addresses, tried in this order.
+# Users never type any of this: the app reads this file (or falls back to v42.ir).
+# One "ip", "domain" or "ip:port" per line; lines starting with # are ignored.
+v42.ir
+185.165.30.181
+103.75.197.49
