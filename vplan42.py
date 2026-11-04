@@ -950,6 +950,56 @@ def parse_invite(text):
     return s if 48 <= len(s) <= 200 and re.fullmatch(r"[A-Za-z0-9_-]+", s) else None
 
 
+def _reg_str(path, name):
+    r"""One string out of HKLM, read from the 64-bit view so a 32-bit build of the app
+    still sees the real machine rather than the redirected copy of the registry."""
+    try:
+        import winreg
+        flag = getattr(winreg, "KEY_WOW64_64KEY", 0)
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0,
+                            winreg.KEY_READ | flag) as k:
+            return str(winreg.QueryValueEx(k, name)[0]).strip()
+    except Exception:
+        return ""
+
+
+def _run_out(cmd):
+    """One short command's stdout, or "" when it is not there to be had."""
+    try:
+        r = subprocess.run(cmd, shell=False, capture_output=True, stdin=subprocess.DEVNULL,
+                           creationflags=0x08000000 | 0x00004000, timeout=10)
+        return oem_decode(r.stdout)
+    except Exception:
+        return ""
+
+
+_MACHINE_ID = None
+
+
+def machine_id():
+    r"""One hash for this box, the way its owner cannot pick one: the install GUID Windows
+    gave this machine plus the board's maker, product and serial, and - only when the
+    registry had nothing to say - the BIOS UUID and the CPU signature from WMI. Missing
+    pieces are left out rather than guessed, so the same PC keeps answering the same, and
+    the answer is remembered for the run: no login waits on a slow disk again.
+    The parts never leave this PC - the network only ever sees the hash."""
+    global _MACHINE_ID
+    if _MACHINE_ID is not None:
+        return _MACHINE_ID
+    parts = [_reg_str(r"SOFTWARE\Microsoft\Cryptography", "MachineGuid"),
+             _reg_str(r"HARDWARE\DESCRIPTION\System\BIOS", "SystemManufacturer"),
+             _reg_str(r"HARDWARE\DESCRIPTION\System\BIOS", "SystemProductName"),
+             _reg_str(r"HARDWARE\DESCRIPTION\System\BIOS", "SystemSerialNumber")]
+    if not any(p for p in parts if p):
+        for cmd in (["wmic", "csproduct", "get", "uuid"], ["wmic", "cpu", "get", "ProcessorId"]):
+            out = _run_out(cmd)
+            parts += [ln.strip() for ln in out.splitlines()[1:] if ln.strip()][:1]
+    keep = [p for p in parts if p and p.upper() not in ("TO BE FILLED BY OEM", "NONE", "DEFAULT")]
+    _MACHINE_ID = (hashlib.sha256(b"v42-machine|" + "|".join(keep).encode("utf-8", "ignore")).hexdigest()
+                   if keep else "")
+    return _MACHINE_ID
+
+
 def register_protocol():
     try:
         import winreg
@@ -1307,6 +1357,8 @@ TR = {
     "Collecting diagnostics (a few seconds)...": "در حال گردآوری اطلاعات (چند ثانیه)...",
     "Invite loaded - log in to join the room.":
         "دعوت‌نامه آماده است - برای ورود به اتاق، وارد شوید.",
+    "This PC already has 3 accounts - sign in to one of them instead":
+        "این رایانه از قبل ۳ حساب دارد - به جای آن وارد یکی از حساب‌ها شوید",
     "This account was used to sign in on another device.":
         "این حساب روی دستگاه دیگری وارد شده است.",
     "Connection to the server lost. Please log in again.":
@@ -2392,7 +2444,7 @@ class App(ctk.CTk):
         def work():
             try:
                 link = open_link(self.q_put)
-                r = link.req("register" if register else "login", u=u, p=p)
+                r = link.req("register" if register else "login", u=u, p=p, hw=machine_id())
                 if not r.get("ok"):
                     self.uq.put({"t": "auth_fail", "err": r.get("err") or "Login failed"})
                     link.close()

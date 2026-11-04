@@ -29,6 +29,7 @@ DATA_DIR = os.path.join(APP_DIR, "vlan42_data")
 DB_FILE = os.path.join(DATA_DIR, "db.sqlite")
 
 MAX_ROOMS_PER_USER = 3
+MAX_ACCOUNTS_PER_MACHINE = 3   # one box hosts three players, no more
 DEFAULT_LIMIT = 16
 UDP_TIMEOUT = 30          # seconds without UDP traffic -> member marked offline (timeout)
 DEFAULT_TCP_PORT = 4242
@@ -161,6 +162,13 @@ class DB:
                 room_id INTEGER, user_id INTEGER, ts REAL,
                 PRIMARY KEY(room_id, user_id));
             """)
+            # which box made the account - on a fresh database and on one that predates
+            # the rule alike, the column is added before anything reads the table
+            try:
+                self.cx.execute("ALTER TABLE users ADD COLUMN machine TEXT")
+            except sqlite3.OperationalError:
+                pass                      # a database that already grew the column
+            self.cx.execute("CREATE INDEX IF NOT EXISTS users_machine ON users(machine)")
             self.cx.commit()
 
     def q(self, sql, args=()):
@@ -230,6 +238,12 @@ class Server:
     def is_banned(self, rid, uid):
         return self.db.one("SELECT * FROM bans WHERE room_id=? AND user_id=?", (rid, uid)) is not None
 
+    def machine_accounts(self, machine):
+        """How many accounts this PC already carries. A box whose hash could not be read
+        is not counted at all - see do_register - so this only ever answers for a real
+        machine, and three is the most any of them may hold."""
+        return len(self.db.q("SELECT id FROM users WHERE machine=?", (machine,)))
+
     def membership_count(self, uid):
         return len(self.db.q("SELECT room_id FROM members WHERE user_id=?", (uid,)))
 
@@ -291,10 +305,21 @@ class Server:
             return {"t": "register", "ok": False, "err": "Password must be at least 4 characters"}
         if self.user_by_name(u):
             return {"t": "register", "ok": False, "err": "This username is already taken"}
+        # a box that cannot be read at all (a stripped WMI, another OS) is not punished for
+        # it: it registers uncounted, and the log says so the team can see the stragglers
+        machine = re.fullmatch(r"[0-9a-f]{16,128}", (m.get("hw") or "").strip().lower())
+        machine = machine.group(0) if machine else ""
+        if not machine:
+            log(f"register '{u}': this PC gave no hardware hash, so it is not counted")
+        if machine and self.machine_accounts(machine) >= MAX_ACCOUNTS_PER_MACHINE:
+            return {"t": "register", "ok": False,
+                    "err": f"This PC already has {MAX_ACCOUNTS_PER_MACHINE} accounts - "
+                           f"sign in to one of them instead"}
         salt = secrets.token_hex(16)
         token = secrets.token_hex(16)
-        self.db.run("INSERT INTO users(username,salt,pwhash,token,created) VALUES(?,?,?,?,?)",
-                    (u, salt, pw_hash(p, salt), token, time.time()))
+        self.db.run("INSERT INTO users(username,salt,pwhash,token,created,machine) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (u, salt, pw_hash(p, salt), token, time.time(), machine))
         c.login(self.user_by_name(u))
         return {"t": "register", "ok": True, "token": token, "user": {"id": c.user["id"], "name": u}}
 
@@ -302,10 +327,30 @@ class Server:
         u = self.user_by_name((m.get("u") or "").strip())
         if not u or pw_hash(m.get("p") or "", u["salt"]) != u["pwhash"]:
             return {"t": "login", "ok": False, "err": "Wrong username or password"}
+        if not self.note_machine(u, m):
+            return {"t": "login", "ok": False,
+                    "err": f"This PC already has {MAX_ACCOUNTS_PER_MACHINE} accounts - "
+                           f"sign in to one of them instead"}
         token = secrets.token_hex(16)
         self.db.run("UPDATE users SET token=? WHERE id=?", (token, u["id"]))
         c.login(self.user_by_name(u["username"]))
         return {"t": "login", "ok": True, "token": token, "user": {"id": u["id"], "name": u["username"]}}
+
+    def note_machine(self, u, m):
+        """An account made before this rule still gets a home: the first PC it signs in
+        from is the one it belongs to, and it counts against that PC's three places."""
+        try:
+            if u["machine"]:
+                return True                      # it already has a home
+        except (KeyError, IndexError):
+            return True                          # an old row: leave it out of the count
+        hw = re.fullmatch(r"[0-9a-f]{16,128}", (m.get("hw") or "").strip().lower())
+        if not hw:
+            return True                          # nothing to attribute; let them in
+        if self.machine_accounts(hw.group(0)) >= MAX_ACCOUNTS_PER_MACHINE:
+            return False
+        self.db.run("UPDATE users SET machine=? WHERE id=?", (hw.group(0), u["id"]))
+        return True
 
     def do_login_token(self, c, m):
         tok = m.get("token") or ""

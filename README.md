@@ -218,3 +218,10 @@ Run them one at a time - they share the config file and the test ports.
   "the network". Virtual room IPs (`10.77.0/16`) are left alone - those are the numbers
   players put into their game, and a click on a player line copies one to the clipboard
   and marks the line `Copied ✓`.
+* **Three accounts to a PC, no more.** The app hashes what Windows and the BIOS say about
+  the box (`machine_id()`: install GUID, board maker/product/serial, and WMI's UUID and CPU
+  signature only if the registry had nothing) and sends only that hash. The server keeps it
+  per account and refuses a fourth registration from the same machine; an account made
+  before the rule is adopted by the first PC it signs in from, so it cannot dodge the count.
+  A box that gives no hash at all is not punished - it registers uncounted and the server
+  log says so.

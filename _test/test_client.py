@@ -6,7 +6,7 @@
 Boots a throw-away server on port 45242 in this folder (fresh database),
 runs the checks, then stops it. Nothing here touches the real vlan42_data.
 """
-import base64, json, os, re, shutil, socket, struct, subprocess, sys, threading, time, queue
+import base64, hashlib, json, os, re, shutil, socket, struct, subprocess, sys, threading, time, queue
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -356,6 +356,44 @@ def main():
     r = a.req("set_limit", room=rid, limit=16)
     check("owner raises limit", r.get("ok"))
     check("erin joins after limit raised", join(dd, a, code, pwd).get("ok"))
+
+    # ---- three accounts to a PC, no more. The hash is what the app reads off the
+    #      hardware; the server never sees the parts it came from.
+    box = hashlib.sha256(b"the same PC").hexdigest()
+    other = hashlib.sha256(b"a different PC").hexdigest()
+    fresh = hashlib.sha256(b"a third PC").hexdigest()
+
+    def reg(name, hw, tag):
+        t = TClient(tag)
+        return t, t.req("register", u=name, p="pw123", hw=hw)
+
+    for n_ in ("pc1", "pc2", "pc3"):
+        _, r = reg(n_, box, n_)
+        check(f"{n_} registers from the box", r.get("ok"), str(r))
+    _, r = reg("pc4", box, "pc4")
+    check("a fourth account on the same box is refused", not r.get("ok"), str(r))
+    check("and says why, in the words the app can show",
+          r.get("err") == "This PC already has 3 accounts - sign in to one of them instead",
+          str(r.get("err")))
+    _, r = reg("pc5", other, "pc5")
+    check("another box still gets its own three", r.get("ok"), str(r))
+
+    # an account made before the rule is not punished for it: it signs in uncounted, and
+    # the first box it signs in from adopts it - using one of that box's three places
+    _, r = reg("preexisting", "", "no-hash")
+    check("an account with no hardware hash is still allowed", r.get("ok"), str(r))
+    m = TClient("adopt-1")
+    check("and it can sign in", m.req("login", u="preexisting", p="pw123").get("ok"))
+    m2 = TClient("adopt-2")
+    check("a box that sees it first claims it",
+          m2.req("login", u="preexisting", p="pw123", hw=fresh).get("ok"))
+    check("the box keeps its word about who it adopted",
+          a.req("my_rooms").get("ok"))
+    for n_ in ("pc6", "pc7"):
+        _, r = reg(n_, fresh, n_)
+        check(f"{n_} registers on the adopting box", r.get("ok"), str(r))
+    _, r = reg("pc8", fresh, "pc8")
+    check("the adopted account used one of that box's three", not r.get("ok"), str(r))
 
     # 3-room cap
     r = a.req("create_room", name="room two", pwd="roompw2")
