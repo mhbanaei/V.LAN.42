@@ -299,6 +299,28 @@ def main():
     check("the ping waits at the far left", ping.pack_info()["side"] == "left",
           str(ping.pack_info()))
 
+    # 5b2. the roster is read from the first line down, in either language, however often
+    # the switch has been thrown - the "waiting for friends" line belongs under the players
+    def roster(tag):
+        settle(app)
+        ys = sorted((app.rows[p][0].winfo_y(), p) for p in app.rows)
+        first, last = ys[0][0], ys[-1][0] + app.rows[ys[-1][1]][0].winfo_height()
+        check(f"{tag}: the players column starts at its top", first < 40, str(first))
+        check(f"{tag}: the players stand in the order they were built in",
+              app.plist.pack_slaves()[:len(app.rows)] == [app.rows[p][0] for p in app.rows],
+              str([k.winfo_y() for k in app.plist.pack_slaves()]))
+        if app.empty.winfo_manager() == "pack":
+            check(f"{tag}: the waiting line stays under the players",
+                  app.empty.winfo_y() > last, f"{app.empty.winfo_y()} vs {last}")
+
+    roster("persian")
+    app.seg_lang.set("English")
+    app.set_lang("English")
+    roster("back in english")
+    app.seg_lang.set("فارسی")
+    app.set_lang("فارسی")
+    roster("persian again")
+
     # 5c. the log and the chat are plain text boxes - their lines are translated as they land
     app.q_put("Left the room")
     app.chat_add("system", "Not connected", "sys")
@@ -306,16 +328,67 @@ def main():
     app.tick()
     log = app.logbox.get("1.0", "end")
     chat = app.chatbox.get("1.0", "end")
-    check("the log answers in Persian", "از اتاق خارج شدید" in log, log[-60:])
-    check("a system line in the chat is Persian", "متصل نیستید" in chat, chat[-60:])
+    check("the log answers in Persian", "از اتاق خارج شدی" in log, log[-60:])
+    check("a system line in the chat is Persian", "به سرور وصل نیستی" in chat, chat[-60:])
     check("another player's own words are never rewritten", "Left the room" in chat, chat[-60:])
 
-    # 5d. Persian sentences put the thing before its count, or Tk drops the count off the end
-    lead = re.compile(r"^\s*(?:[۰-۹0-9]|\{(?:n|m|o|on|total|limit|count)\})")
-    opens = [k for k, v in vp.TR.items() if v and lead.match(v)]
-    check("no Persian line opens with a number", not opens, str(opens[:3]))
+    # 5d. Tk lays a line's pieces down left to right in the order it is handed them and only
+    # turns the letters inside each piece - so a mixed Persian line has to be handed over back
+    # to front, and handing it over a second time must not undo that. The piece written last
+    # is the one a right-to-left reader meets first.
+    mixed = vp.fmt("{who}   ·   {vip}   ·   role: {r}", who="sara", vip="10.77.0.7", r="عضو")
+    pieces = vp.rtl_runs(mixed.lstrip(vp.RLM))
+    check("the name and its IP are one Latin piece, written last so it sits on the right",
+          pieces[-1] == "sara   ·   10.77.0.7", str(pieces))
+    check("and the Persian words are written first, at the left, where reading ends",
+          vp.has_rtl(pieces[0]) and not pieces[0].isascii(), str(pieces[0]))
+    check("writing the line again leaves it exactly as it was", vp.bidi(mixed) == mixed, repr(mixed))
+    plain = vp.T("Members")
+    check("a phrase that is all Persian is not touched", plain == "اعضا" and not plain.startswith(vp.RLM),
+          repr(plain))
+    count = vp.fmt("{n} online", n=4)
+    check("a count is written before its word, so the word lands on the right",
+          count.endswith("آنلاین"), repr(count))
 
-    # 5e. and nothing on a Persian screen stayed English. "English" itself is the name the
+    # 5e. the log is told again in the language just picked, and the page says where you are
+    # from the corner a reader starts in
+    app.q_put("Left the room")
+    app.q_putf("Logged in as {name}", name="milad")
+    app.tick()
+    app.seg_lang.set("English")
+    app.set_lang("English")
+    settle(app)
+    back = app.logbox.get("1.0", "end")
+    check("the whole log is said again in English", "Left the room" in back and "خارج" not in back,
+          back[-90:])
+    check("a line built from a shape is told again too", "Logged in as milad" in back, back[-120:])
+    app.seg_lang.set("فارسی")
+    app.set_lang("فارسی")
+    settle(app)
+    again = app.logbox.get("1.0", "end")
+    check("and again in Persian, the older lines with it",
+          again.count("از اتاق خارج شدی") >= 2, str(again.count("از اتاق خارج شدی")))
+    check("with its pieces in the new words as well",
+          vp.fmt("Logged in as {name}", name="milad") in again, again[-120:])
+
+    def texts(w, out):
+        for c in w.winfo_children():
+            if isinstance(c, vp.Label) and str(c.cget("text")).strip():
+                out.append(c)
+            texts(c, out)
+        return out
+
+    app.select_tab("logs")
+    settle(app)
+    on_head = texts(app.pages["logs"], [])
+    tit = [w for w in on_head if str(w.cget("text")) == vp.T("Logs")]
+    sup = [w for w in on_head if "reymit" in str(w.cget("text"))]
+    first = tit and sup and ((tit[0].winfo_rootx() > sup[0].winfo_rootx())
+                             if vp.LANG[0] == "fa" else tit[0].winfo_rootx() < sup[0].winfo_rootx())
+    check("the page names itself at the reading edge, before the thanks", bool(first),
+          f"title x={tit[0].winfo_rootx() if tit else '-'} thanks x={sup[0].winfo_rootx() if sup else '-'}")
+
+    # 5f. and nothing on a Persian screen stayed English. "English" itself is the name the
     # language switch offers, in its own tongue; the notice is a message somebody typed.
     NAMES = {"VLAN", "English", "Test", "hello", "sara", "milad", "negar", "042",
              "war room", "my room", "friend room", "reymit.ir/42level"}
@@ -352,7 +425,7 @@ def main():
         app.awin.destroy()
         app.awin = None
 
-    # 5f. the team's own pages: the password card in Settings and the console table
+    # 5g. the team's own pages: the password card in Settings and the console table
     app.staff = True
     app.select_tab("settings")
     settle(app)

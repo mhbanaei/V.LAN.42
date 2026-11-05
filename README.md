@@ -81,6 +81,7 @@ remove admin <name>     take that right back
 set limit <room> <n>    how many players a room may hold (2-64)
 set room <room> <name>  give a room another name
 remove room <room>      delete a room - nobody inherits it
+enter room <room>       step into a room as management
 help                    this list
 ```
 
@@ -94,9 +95,18 @@ only for an account the team vouched for. *Users / Rooms / Traffic*, a click on 
 header to sort, a box to search, the rooms each account holds listed in its line,
 `Make team` / `Remove from team` on a user row, and on a room row its **name and ceiling
 typed in the row** with *Save*, plus *Delete* - which asks "Sure?" first and only deletes
-on the second click. `set admin` opens that panel on the
+on the second click - and *Enter room*, which puts you inside that room the way
+`enter room` does from the window. `set admin` opens that panel on the
 account's screen the moment you type it - no signing out and back in for them, and
 `remove admin` closes it the same way.
+
+Entering a room as management is not a promotion the player can hand out. The server
+attaches the connection to the room as an admin carrying one permission no tick in the
+interface can set - `manage` - and that permission is only ever written by `enter room`,
+which answers to the two doors below. Inside, their line reads **Management** in red where
+a player's would read *Owner* or *Admin*, and every room action is theirs: kick, ban,
+unban, limit, approve, invite. Nobody inside a room can grant it to themselves or to
+another, because no room command writes it - only the console does.
 
 ---
 
@@ -121,10 +131,13 @@ Inside the app:
   appear when a friend is chosen and go away with *Close chat*.
 * **Room** - appears in the tab bar only while you are inside one. One clean card per
   player: status dot, name, their ping, and clicking the card copies their virtual IP.
-  The room stays attached to the server even when you are the only one inside, and it
-  stays attached while you visit the other tabs - only *Leave room* or entering a
-  different room lets it go. The buttons are pinned to the bottom of the column, so a
-  short window shrinks the player list instead of swallowing them.
+  The list always reads from the top - owner, then admins, then members, each group in
+  name order - whether the roster just changed, the tab just opened or the language just
+  turned over, and the "waiting for your friends" line stays under it instead of pushing
+  everybody down. The room stays attached to the server even when you are the only one
+  inside, and it stays attached while you visit the other tabs - only *Leave room* or
+  entering a different room lets it go. The buttons are pinned to the bottom of the
+  column, so a short window shrinks the player list instead of swallowing them.
 * **Logs** - everything the app has to say. Nothing is written to a `.log` file.
 * **Settings** - English / فارسی, the message sound, and a card to change your own
   password. The current one is asked for, so a seat left unlocked is not a way in; the
@@ -132,8 +145,9 @@ Inside the app:
   and *remember me* carries on with the new password. For the team, one more card:
   *Open the console*. The page scrolls, so no card is ever out of reach on a short window.
 
-The name of the app is drawn once, in the top bar; a page header only says where you are
-and thanks the people whose support pays for the servers - `reymit.ir/42level`, clickable.
+The name of the app is drawn once, in the top bar; a page header only says where you are -
+at the corner reading starts from - and thanks the people whose support pays for the
+servers, `reymit.ir/42level`, clickable, trailing behind it.
 
 Nothing pops up over the window. A notice - a friend request, a message while you are on
 another page, a guest knocking, an invite waiting on the host - is one thin line directly
@@ -176,6 +190,9 @@ no room borrows another room's rules.
   the members, each group in name order. The roster key that decides whether the column
   is rebuilt carries every member's role, so the moment somebody is promoted or demoted
   the column reorders itself on the next state the server sends.
+* A fourth rank exists but is never granted from inside a room: **Management**, shown in
+  red on the player line of whoever entered through the console. It carries every
+  permission of that room and nothing can tick it on or off - see the console above.
 
 ### Invites
 
@@ -216,16 +233,31 @@ What the mirror covers, because a word that is not moved is a word that disappea
 * grid columns *and* the column that stretches, so a mirrored row keeps its shape instead
   of opening a gap in the middle;
 * the **order** inside a packed column: `pack` puts anything it re-packs at the end of its
-  stack, so the mirror re-packs the whole group in the order the code used (`after=`
-  chaining) instead of moving one widget at a time;
-* log lines and system chat lines, which are plain text and are translated as they land -
-  a player's own message is never rewritten;
-* Persian lines name the thing before its count (`عضو: ۲`, not `۲ عضو`), because Tk sends
-  a number that opens a right-to-left line to the far end of it.
+  stack, so the mirror re-packs the whole group in the order the packer reports (`after=`
+  chaining) instead of moving one widget at a time. The packer's order, not the order the
+  widgets were born in - a caption built before any player would otherwise land above them;
+* the words themselves: Tk has **no bidirectional reordering**. It lays a line's pieces
+  down left to right in the order they are written and only turns the letters inside each
+  piece. So `bidi()` hands a mixed Persian line over back to front - the piece a reader
+  meets first is the one written last - which is why "sara · 10.77.0.7 · نقش: عضو" ends up
+  with the name on the right, where Persian reading starts. A line that is all Persian is
+  one piece and is left exactly as it is; a RIGHT-TO-LEFT MARK changes nothing in Tk and is
+  only kept as a stamp that says "this line has already been written";
+* log lines and system chat lines, which are plain text. A line said from a template is
+  kept as *shape plus pieces*, so the whole log is told again in the language just picked
+  instead of freezing in the words it happened to be written in - and copying it out gives
+  the same sentences the screen shows. A player's own message is never rewritten.
 
-A language switch rebuilds the lists it can (rooms, players, friends) *before* mirroring,
-never after: mirroring a widget that is about to be destroyed leaves customtkinter
-redrawing a canvas that is gone.
+The Persian is written the way people speak it, not the way a formal letter reads:
+"از دوستت بخواه دوباره برات بفرسته", "رمز جدید باید حداقل ۶ کاراکتر باشه" - and the
+spelling and half-spaces (‌) are the ones a Persian reader expects.
+
+A language switch rebuilds the lists it can (rooms, players, friends, the log) *before*
+mirroring, never after: mirroring a widget that is about to be destroyed leaves
+customtkinter redrawing a canvas that is gone. Turning the language over moves about every
+widget the app has, and over half a second of that is a scramble to watch, so the window
+and its floating cards are faded out for the swap and come back once - the two languages
+trade places instead of shuffling.
 
 Only the geometry managers this app uses itself are touched (`_box`/`_glass` in
 `vplan42.py`): a button's own label, an entry's own box, a segmented switch's own buttons

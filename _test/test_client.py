@@ -714,6 +714,40 @@ def main(srv):
           not admin(a, f"remove room {rid}").get("ok"))
     check("and a room id that is not a number", not admin(a, "remove room abc").get("ok"))
 
+    # ---- the team stepping into a room they do not own
+    rb = b.req("create_room", name="bob room", pwd="roompw9")
+    check("a room the team does not own", rb.get("ok"), str(rb))
+    rid2 = rb["room"]["id"]
+    r = admin(a, f"enter room {rid2}")
+    check("the team walks into it without a password and without asking",
+          r.get("ok") and r.get("room", {}).get("id") == rid2, str(r)[:140])
+    perms = (r.get("room") or {}).get("my_perms") or {}
+    check("inside, Management holds every permission of that room",
+          perms.get("manage") is True and all(perms.get(k) for k in
+                                              ("kick", "ban", "unban", "limit", "approve", "invite")),
+          str(perms))
+    check("and the roster says so too",
+          any(m["name"] == "alice" and (m.get("perms") or {}).get("manage")
+              for m in (r.get("room") or {}).get("members", [])), str(r.get("room", {}).get("members")))
+    check("the team is a member now, so the room shows in their list",
+          any(x["id"] == rid2 for x in a.req("my_rooms")["rooms"]))
+    check("management may set the room defaults, which only the owner could",
+          a.req("set_roles", room=rid2, defaults={"member": {"invite": True}}).get("ok"),
+          str(a.req("set_roles", room=rid2, defaults={"member": {"invite": True}})))
+    check("and the owner of that room is still the owner",
+          next((m for m in (a.req("room_state", room=rid2).get("room") or {}).get("members", [])
+                if m["name"] == "bob"), {}).get("role") == "owner",
+          str((a.req("room_state", room=rid2).get("room") or {}).get("members")))
+    check("a plain account cannot ask for that door",
+          not admin(b, f"enter room {rid2}", stamp="").get("ok"))
+    check("and the server window alone cannot walk anyone in - it has no account",
+          "Sign in as the team first" in console("enter", "room", str(rid2))[0])
+    check("stepping out again is an ordinary leave", a.req("remove_room", room=rid2).get("ok"),
+          str(a.req("remove_room", room=rid2)))
+    check("and the room is no longer in the team's list",
+          not any(x["id"] == rid2 for x in a.req("my_rooms")["rooms"]))
+    check("the owner still has it", any(x["id"] == rid2 for x in b.req("my_rooms")["rooms"]))
+
     out, rc = console("remove", "admin", "alice")
     check("the server window takes the right back",
           rc == 0 and "not management any more" in out, out)

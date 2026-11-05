@@ -35,6 +35,7 @@ UDP_TIMEOUT = 30          # seconds without UDP traffic -> member marked offline
 DEFAULT_TCP_PORT = 4242
 DEFAULT_UDP_PORT = 4242
 PERMS = ("kick", "ban", "unban", "limit", "approve", "invite")
+MANAGE = "manage"       # the team's own key inside a room: never offered to an owner to tick
 
 # ---------------------------------------------------------- management console
 # The team's own door. Its key is made on the first run and lives in one file next to
@@ -495,10 +496,22 @@ class Server:
 
     def eff_perms(self, rid, role, explicit):
         """The ticks that actually apply to a person: what the owner set for them, over
-        what the room says for their role. A tick taken off is as loud as one put on."""
+        what the room says for their role. A tick taken off is as loud as one put on.
+        The team's own mark rides above all of it - it is not a tick anyone can remove."""
         own = json.loads(explicit or "{}") if isinstance(explicit, str) else (explicit or {})
         base = self.room_defaults(rid).get(role, {})
-        return {k: bool(own[k]) if k in own else bool(base.get(k)) for k in PERMS}
+        out = {k: bool(own[k]) if k in own else bool(base.get(k)) for k in PERMS}
+        if own.get(MANAGE):
+            out[MANAGE] = True
+            for k in PERMS:
+                out[k] = True
+        return out
+
+    def above_owner(self, me, rid):
+        """The person who made the room, or the team standing in it: both may do the things
+        that only the owner could do. Nothing else in the room reaches this."""
+        return bool(me) and (me["role"] == "owner" or
+                             bool(self.eff_perms(rid, me["role"], me["perms"]).get(MANAGE)))
 
     def can(self, uid, rid, perm):
         me = self.member_row(rid, uid)
@@ -678,7 +691,7 @@ class Server:
         t = self.member_row(rid, target)
         if not t:
             return {"t": "kick", "ok": False, "err": "That user is not a member"}
-        if t["role"] != "member" and me["role"] != "owner":
+        if t["role"] != "member" and not self.above_owner(me, rid):
             return {"t": "kick", "ok": False, "err": "Only the owner can kick admins"}
         self.db.run("DELETE FROM members WHERE room_id=? AND user_id=?", (rid, target))
         self.db.run("DELETE FROM jreq WHERE room_id=? AND user_id=?", (rid, target))
@@ -701,7 +714,7 @@ class Server:
         t = self.member_row(rid, target)
         if not t:
             return {"t": "ban", "ok": False, "err": "That user is not a member"}
-        if t["role"] != "member" and me["role"] != "owner":
+        if t["role"] != "member" and not self.above_owner(me, rid):
             return {"t": "ban", "ok": False, "err": "Only the owner can ban admins"}
         reason = (m.get("reason") or "").strip()[:120]
         self.db.run("INSERT OR REPLACE INTO bans(room_id,user_id,by_id,reason,ts) VALUES(?,?,?,?,?)",
@@ -739,7 +752,7 @@ class Server:
     def do_set_admin(self, c, m):
         uid, rid, target = c.user["id"], int(m.get("room") or 0), int(m.get("user") or 0)
         me = self.member_row(rid, uid)
-        if not me or me["role"] != "owner":
+        if not self.above_owner(me, rid):
             return {"t": "set_admin", "ok": False, "err": "Only the owner can manage admins"}
         t = self.member_row(rid, target)
         if not t or t["role"] == "owner":
@@ -761,7 +774,7 @@ class Server:
         another room starts from that room's own defaults again."""
         uid, rid, target = c.user["id"], int(m.get("room") or 0), int(m.get("user") or 0)
         me = self.member_row(rid, uid)
-        if not me or me["role"] != "owner":
+        if not self.above_owner(me, rid):
             return {"t": "set_perms", "ok": False, "err": "Only the owner can set permissions"}
         t = self.member_row(rid, target)
         if not t or t["role"] == "owner":
@@ -873,7 +886,7 @@ class Server:
         vouched = bool(c.user) and c.user["username"].lower() in staff_users(self.cfg)
         if not vouched and not staff_ok(m.get("stamp")):
             return {"t": "admin", "ok": False, "err": "This is not the management console"}
-        return self.admin_cmd(m.get("cmd"))
+        return self.admin_cmd(m.get("cmd"), c)
 
     def admin_drop_room(self, rid):
         """The team deletes a room outright: nothing is handed to another member, the room
@@ -894,11 +907,33 @@ class Server:
                         else "DELETE FROM rooms WHERE id=?", (rid,))
         return f"Room {rid} is deleted - its members are told, nothing was handed over."
 
-    def admin_cmd(self, cmd):
+    def admin_enter(self, c, rid):
+        """The team steps into a room to set it right. The door is not asked for - they
+        hold the machine - and inside they are Management: every permission, shown so."""
+        uid = c.user["id"]
+        me = self.member_row(rid, uid)
+        if me:
+            perms = json.loads(me["perms"] or "{}")
+            perms[MANAGE] = True
+            self.db.run("UPDATE members SET perms=? WHERE room_id=? AND user_id=?",
+                        (json.dumps(perms), rid, uid))
+        else:
+            taken = {row["vip"] for row in self.room_members(rid)}
+            self.db.run("INSERT INTO members(room_id,user_id,role,perms,vip,joined) "
+                        "VALUES(?,?,?,?,?,?)",
+                        (rid, uid, "admin", json.dumps({MANAGE: True}), make_vip(taken), time.time()))
+        self.db.run("DELETE FROM jreq WHERE room_id=? AND user_id=?", (rid, uid))
+        self.push_state(rid)
+        r = self.room_json(rid, uid)
+        return {"t": "admin", "ok": True, "room": r,
+                "out": f"You are inside room {rid} ({r['name']}) as Management"}
+
+    def admin_cmd(self, cmd, c=None):
         """The commands themselves. The server's own window runs them at once - whoever can
-        type at that keyboard owns the machine, and that is the whole credential."""
+        type at that keyboard owns the machine, and that is the whole credential. Only
+        `enter room` needs a signed-in account, because it walks someone into a room."""
         words = (cmd or "").split()
-        pair = bool(words) and words[0].lower() in ("set", "remove")
+        pair = bool(words) and words[0].lower() in ("set", "remove", "enter")
         verb = " ".join(words[:2]).lower() if pair else (words[0].lower() if words else "")
         arg = " ".join(words[2:] if pair else words[1:]).strip()
         if verb in ("help", "-h", "?"):
@@ -953,6 +988,15 @@ class Server:
             if not self.db.one("SELECT id FROM rooms WHERE id=?", (rid,)):
                 return {"t": "admin", "ok": False, "err": f"No room with id {rid}"}
             return {"t": "admin", "ok": True, "out": self.admin_drop_room(rid)}
+        if verb == "enter room":
+            if not (c and c.user):
+                return {"t": "admin", "ok": False, "err": "Sign in as the team first"}
+            if not arg.isdigit():
+                return {"t": "admin", "ok": False, "err": "Use: enter room <room id>"}
+            rid = int(arg)
+            if not self.db.one("SELECT id FROM rooms WHERE id=?", (rid,)):
+                return {"t": "admin", "ok": False, "err": f"No room with id {rid}"}
+            return self.admin_enter(c, rid)
         return {"t": "admin", "ok": False, "err": "Unknown command"}
 
     def do_room_state(self, c, m):
@@ -975,7 +1019,7 @@ class Server:
         ticks mean for everyone in this room who has no tick of their own."""
         uid, rid = c.user["id"], int(m.get("room") or 0)
         me = self.member_row(rid, uid)
-        if not me or me["role"] != "owner":
+        if not self.above_owner(me, rid):
             return {"t": "set_roles", "ok": False, "err": "Only the owner can set the room defaults"}
         got = m.get("defaults") or {}
         out = {}
@@ -1700,6 +1744,7 @@ Type them into the window that is running the server, or next to it:
   set limit <room> <n>   how many players room <room> may hold (2-64)
   set room <room> <name> call room <room> something else
   remove room <room>     delete the room - nobody inherits it
+  enter room <room>      step into a room as Management (needs a signed-in team account)
   help                   this list
 
 Nothing here needs a password: whoever can type in the server's window is whoever holds

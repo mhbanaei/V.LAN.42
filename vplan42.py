@@ -1121,6 +1121,65 @@ def has_rtl(text):
     return any("\u0590" <= c <= "\u08ff" or "\ufb1d" <= c <= "\ufdff" or "\ufe70" <= c <= "\ufeff" for c in text)
 
 
+RLM = "\u200f"     # invisible, and here only a stamp that says "this line is already written
+                   # the way Tk wants its pieces" - reversing a second time would undo it
+
+
+def _run_kind(c):
+    """What piece of a line this character belongs to: r for Persian, l for anything Latin -
+    letters and every digit, Persian ones included, because Tk lays a number down as its own
+    little left-to-right island - and None for the spaces and marks in between."""
+    if "\u0590" <= c <= "\u08ff" or "\ufb1d" <= c <= "\ufdff" or "\ufe70" <= c <= "\ufeff":
+        return "r"
+    if c.isalnum():
+        return "l"
+    return None
+
+
+def rtl_runs(text):
+    """Split a line into the pieces Tk will lay down one after another: a stretch of Persian,
+    a stretch of Latin, and the marks between them. A gap only ends a piece when the word
+    after it is of the other kind - the space between two Persian words belongs to the phrase,
+    the space between a Persian word and a number is the border."""
+    runs, i, n = [], 0, len(text)
+    while i < n:
+        k = _run_kind(text[i])
+        j = i
+        while j < n:
+            kk = _run_kind(text[j])
+            if kk == k:
+                j += 1
+                continue
+            if kk is None:
+                p = j
+                while p < n and _run_kind(text[p]) is None:
+                    p += 1
+                if p < n and _run_kind(text[p]) == k:
+                    j = p
+                    continue
+            break
+        runs.append(text[i:j])
+        i = j
+    return runs
+
+
+def bidi(text):
+    """Write a mixed Persian line back to front, so a right-to-left reader meets its words in
+    the order they were meant to be read. Tk has no bidirectional reordering at all: it lays a
+    line's pieces down left to right in the order they are written and only turns the letters
+    inside each piece round - which is why "sara · 10.77.0.7 · نقش: عضو" puts the name at the
+    left, where a Persian reader finishes the line instead of starting it. A mark like
+    RIGHT-TO-LEFT MARK changes nothing about that; the only thing Tk obeys is the order it is
+    given, so the order is what gets changed. A line of a single piece - every plain Persian
+    phrase - is already right and is left completely alone."""
+    if LANG[0] != "fa" or not text or not has_rtl(text) or text.startswith(RLM):
+        return text
+    runs = rtl_runs(text)
+    if all(_run_kind(c) in (None, "r") for r in runs for c in r):
+        return text
+    return RLM + "".join(reversed(runs))
+
+
 def pick_fa_font(master):
     """The first Persian face this machine really has, or "" to stay with the UI font.
     Only tkinter knows which families are installed, so this waits for the window."""
@@ -1219,6 +1278,7 @@ def fix_clipboard(widget):
 def setw(w, **kw):
     if "text" in kw:
         w.__dict__["_src"] = kw["text"]
+        w.__dict__.pop("_src_fmt", None)     # a line said outright outranks a remembered shape
         kw["text"] = T(kw["text"])
     cache = w.__dict__.setdefault("_last", {})
     ch = {k: v for k, v in kw.items() if cache.get(k) != v}
@@ -1229,15 +1289,24 @@ def setw(w, **kw):
             w.refit()          # the new word may need more room than the old one
 
 
+def setf(w, template, pieces=None, **kw):
+    """A line made from a template. setw alone cannot serve here: by the time it is handed the
+    text, the sentence is already assembled and the switch to the other language would only
+    say it again in the words it happens to be in. So the shape and its pieces are kept, and
+    the line is built anew every time the language changes. `pieces` are what fills the shape;
+    anything else goes to the widget as style."""
+    setw(w, text=fmt(template, **(pieces or {})), **kw)
+    w.__dict__["_src_fmt"] = (template, dict(pieces or {}))
+
+
 # ------------------------------------------------------------------ two languages
 LANG = ["en"]        # "en" or "fa", the language the interface is drawn in
 SOUND = [True]       # the little ding that answers a message
 
 # English is what the code is written with; Persian is what the screen shows when
 # the player asks for it. Names, numbers and the wordmark are never translated.
-# Tk puts a number to the left of the Persian word beside it and sends a number that
-# opens a line to the far end of that line - so every Persian phrase here names the
-# thing before its count ("عضو: ۲"), never the count first.
+# Write the Persian the way it is said: bidi() puts the pieces of a mixed line in the order
+# Tk has to be given them, so a name or a count never lands on the wrong side of its words.
 TR = {
     # ------------------------------------------------- navigation and credits
     "Rooms": "اتاق‌ها",
@@ -1248,7 +1317,7 @@ TR = {
     "Settings": "تنظیمات",
     "Logout": "خروج",
     "DEVELOPED BY : Hossein42\nUI / UX DESIGN : Erfan.Sh":
-        "توسعه : Hossein42\nرابط و تجربه : Erfan.Sh",
+        "برنامه: Hossein42\nطراحی: Erfan.Sh",
     "coded by Hossein & Erfan": "کدنویسی: Hossein و Erfan",
     "Room · {n}": "اتاق · {n}",
     # ------------------------------------------------- sign in
@@ -1257,28 +1326,28 @@ TR = {
     "Login": "ورود",
     "Register": "ثبت‌نام",
     "Sign in": "ورود",
-    "Enter your username and password.": "نام کاربری و رمز عبور خود را وارد کنید.",
+    "Enter your username and password.": "نام کاربری و رمزت را وارد کن.",
     "Signing in...": "در حال ورود...",
-    "Signing in with the saved session...": "ورود با نشستِ ذخیره‌شده...",
-    "Please wait...": "لطفاً صبر کنید...",
-    "Remember me on this PC": "مرا در این رایانه به خاطر بسپار",
-    "● Connected": "● متصل",
-    "● Connecting": "● در حال اتصال",
-    "● Waiting": "● در انتظار",
+    "Signing in with the saved session...": "دارم با اطلاعات ذخیره‌شده وارد می‌شم...",
+    "Please wait...": "لطفاً صبر کن...",
+    "Remember me on this PC": "توی این سیستم خاطرم داشته باش",
+    "● Connected": "● وصل",
+    "● Connecting": "● در حال وصل شدن",
+    "● Waiting": "● منتظر",
     "signed in as": "وارد شده با",
-    "{app} network online": "شبکه‌ی {app} آنلاین است",
+    "{app} network online": "شبکه‌ی {app} بالاست",
     # ------------------------------------------------- rooms page
-    "Play together over a\nvirtual local network.": "با هم روی یک شبکه‌ی محلی مجازی بازی کنید.",
-    "Play together over a virtual local network.": "با هم روی یک شبکه‌ی محلی مجازی بازی کنید.",
+    "Play together over a\nvirtual local network.": "با هم روی یک شبکه‌ی محلی مجازی بازی کن.",
+    "Play together over a virtual local network.": "با هم روی یک شبکه‌ی محلی مجازی بازی کن.",
     "My rooms": "اتاق‌های من",
     "Create a room": "ساخت اتاق",
     "Join a room": "ورود به اتاق",
     "{n} / {m} rooms": "اتاق {n} از {m}",
     "No rooms yet - create one or join with an invite code.":
-        "هنوز اتاقی ندارید - یکی بسازید یا با کد دعوت وارد شوید.",
+        "هنوز اتاقی نداری - یکی بساز یا با کد دعوت وارد شو.",
     "Waiting for your friends...\nSend them the invite code.":
-        "در انتظار دوستانتان...\nکد دعوت را برایشان بفرستید.",
-    "No friends yet.": "هنوز دوستی ندارید.",
+        "در انتظار دوستانت...\nکد دعوت رو براشون بفرست.",
+    "No friends yet.": "هنوز دوستی نداری.",
     "Create room": "ساخت اتاق",
     "Room name": "نام اتاق",
     "Room password": "رمز اتاق",
@@ -1287,68 +1356,68 @@ TR = {
     "Enter": "ورود",
     "Invite": "دعوت",
     "Invite code": "کد دعوت",
-    "Invite code from your friend": "کد دعوت دوست شما",
+    "Invite code from your friend": "کد دعوتی که دوستت فرستاده",
     "xxxx.xxxx.xxxx...": "xxxx.xxxx.xxxx...",
     "Copy invite code": "کپی کد دعوت",
     "This is not a valid invite code. Ask your friend to send it again.":
-        "این کد دعوت درست نیست. دوباره از دوستتان بخواهید آن را بفرستد.",
+        "این کد دعوت درست نیست. از دوستت بخواه دوباره برات بفرسته.",
     "There is no invite code yet - enter a room first.":
-        "هنوز کد دعوتی نیست - اول وارد یک اتاق شوید.",
+        "هنوز کد دعوتی نیست - اول وارد یک اتاق شو.",
     "Invite code (already copied to your clipboard):":
-        "کد دعوت (قبلاً در حافظه کپی شده):",
+        "کد دعوت (از قبل توی حافظه کپی شده):",
     "Copy code": "کپی کد",
     "The QR picture needs:  pip install qrcode[pil]":
-        "برای ساخت تصویر QR نیاز است به:  pip install qrcode[pil]",
+        "برای تصویر QR این لازم‌ه:  pip install qrcode[pil]",
     # ------------------------------------------------- friends
     "Search": "جستجو",
     "Search username...": "جستجوی نام کاربری...",
     "Add": "افزودن",
     "Chat": "گفتگو",
     "Open": "باز کردن",
-    "Accept": "پذیرفتن",
+    "Accept": "قبول",
     "No users found.": "کاربری پیدا نشد.",
     "No friends yet - search a username above.":
-        "هنوز دوستی ندارید - بالا نام کاربری را جستجو کنید.",
+        "هنوز دوستی نداری - بالا یک نام کاربری رو جستجو کن.",
     "No chat open": "گفتگویی باز نیست",
-    "pick a friend on the left": "از سمت راست یک دوست را انتخاب کنید",
+    "pick a friend on the left": "از سمت راست یک دوست را انتخاب کن",
     "Friends ({n})": "دوستان ({n})",
     "Friend requests ({n})": "درخواست‌های دوستی ({n})",
     "Make admin": "مدیر کردن",
-    "Rank, permissions and the member limit": "مقام، اجازه‌ها و سقف اعضا",
+    "Rank, permissions and the member limit": "نقش، اجازه‌ها و سقف اعضا",
     "{name}  (online)": "{name}  (آنلاین)",
     "Send": "ارسال",
-    "Type a message...": "پیام بنویسید...",
+    "Type a message...": "پیام بنویس...",
     "{n} online": "آنلاین: {n}",
     "{on} / {total} online": "آنلاین {on} از {total}",
     "0 online": "آنلاین: ۰",
-    "{name} is typing ...": "{name} در حال نوشتن است...",
-    "{a} and {b} are typing ...": "{a} و {b} در حال نوشتن هستند...",
+    "{name} is typing ...": "{name} داره می‌نویسه...",
+    "{a} and {b} are typing ...": "{a} و {b} دارن می‌نویسن...",
     "{n} people are typing ...": "در حال نوشتن: {n} نفر...",
     # ------------------------------------------------- inside a room
-    "Players": "بازیکنان",
+    "Players": "بازیکن‌ها",
     "Member limit:": "سقف اعضا:",
     "Leave room": "خروج از اتاق",
     "Admin panel": "پنل مدیر",
     "Room control": "کنترل اتاق",
     "Members": "اعضا",
     "Members - tap a rank or a permission to change it":
-        "اعضا - برای تغییر مقام یا اجازه روی آن بزنید",
+        "اعضا - برای تغییر نقش یا اجازه رویش بزن",
     "Ban list": "لیست مسدودها",
     "Ban": "مسدود",
     "Unban": "رفع مسدودی",
-    "Approve": "پذیرفتن",
+    "Approve": "قبول",
     "Member limit": "سقف اعضا",
-    "Role defaults": "پیش‌فرض مقام‌ها",
+    "Role defaults": "پیش‌فرض نقش‌ها",
     "{role} - by default": "{role} - پیش‌فرض",
     "What a member and an admin may do in this room by default":
-        "در این اتاق یک عضو و یک مدیر به‌طور پیش‌فرض چه می‌توانند بکنند",
+        "توی این اتاق یک عضو و یک مدیر به‌طور پیش‌فرض چه کارهایی می‌تونن بکنن",
     "Room defaults saved": "پیش‌فرض‌های اتاق ذخیره شد",
-    "Saving the defaults failed": "ذخیره کردن پیش‌فرض‌ها انجام نشد",
-    "Permission failed: {err}": "تغییر اجازه ناموفق بود: {err}",
-    "Invite code copied - send it to a friend": "کد دعوت کپی شد - برای دوستتان بفرستید",
+    "Saving the defaults failed": "ذخیره کردن پیش‌فرض‌ها نشد",
+    "Permission failed: {err}": "تغییر اجازه انجام نشد: {err}",
+    "Invite code copied - send it to a friend": "کد دعوت کپی شد - بفرستیش برای دوستت",
     "The room has no invite code yet - the server may need updating. Ask the team to run their start_server.bat again.":
-        "این اتاق هنوز کد دعوتی ندارد؛ شاید سرور نیاز به به‌روزرسانی دارد. از تیم بخواهید start_server.bat را دوباره اجرا کند.",
-    "You may not invite people into this room": "شما نمی‌توانید در این اتاق کسی را دعوت کنید",
+        "این اتاق هنوز کد دعوتی نداره؛ شاید سرور باید به‌روز بشه. از تیم بخواه start_server.bat رو دوباره اجرا کنه.",
+    "You may not invite people into this room": "توی این اتاق نمی‌تونی کسی رو دعوت کنی",
     "Kick": "اخراج",
     "Remove admin": "برداشتن مدیر",
     "Apply": "اعمال",
@@ -1356,142 +1425,141 @@ TR = {
     "Set": "تنظیم",
     "Close": "بستن",
     "Paste": "چسباندن",
-    "No banned users in this room.": "در این اتاق کاربر مسدودی وجود ندارد.",
+    "No banned users in this room.": "توی این اتاق کاربر مسدودی نیست.",
     "online": "آنلاین",
     "offline": "آفلاین",
     "timeout": "بی‌پاسخ",
-    "role: {r}": "مقام: {r}",
-    "(owner)": "(مالک)",
+    "role: {r}": "نقش: {r}",
+    "(owner)": "(صاحب)",
     "(admin)": "(مدیر)",
-    "owner": "مالک",
+    "owner": "صاحب",
     "admin": "مدیر",
     "member": "عضو",
     "member ": "عضو ",
-    "👑 Owner": "👑 مالک",
+    "👑 Owner": "👑 صاحب",
     "🛡 Admin": "🛡 مدیر",
     "Member": "عضو",
     "no reason": "بی‌دلیل",
-    "Owner": "مالک",
+    "Owner": "صاحب",
     "Admin": "مدیر",
     "{m} members · {o} online · you are {role} · limit {limit}":
-        "عضو: {m} · آنلاین: {o} · شما {role} هستید · سقف: {limit}",
-    "you host this room": "میزبان این اتاق شما هستید",
-    "inside this room": "داخل این اتاق",
-    "{who}   ·   {vip}   ·   role: {r}": "{who}   ·   {vip}   ·   مقام: {r}",
+        "عضو: {m} · آنلاین: {o} · نقش تو: {role} · سقف: {limit}",
+    "you host this room": "میزبان این اتاق تو هستی",
+    "inside this room": "توی این اتاق",
+    "{who}   ·   {vip}   ·   role: {r}": "{who}   ·   {vip}   ·   نقش: {r}",
     "{who}   (you)": "{who}   (خودت)",
     "{vip}  ·  no answer since {t}": "{vip}  ·  از {t} بی‌پاسخ",
-    "{vip} copied - paste it into the game": "{vip} کپی شد - در بازی آن را بچسبانید",
+    "{vip} copied - paste it into the game": "{vip} کپی شد - توی بازی بچسبون",
     "Copied ✓": "کپی شد ✓",
     # ------------------------------------------------- logs
     "Copy log": "کپی گزارش",
     "Save log": "ذخیره‌ی گزارش",
     "Diagnostics": "عیب‌یابی",
-    "Diag ZIP": "فشرده‌ی عیب‌یابی",
+    "Diag ZIP": "فایل عیب‌یابی",
     # ------------------------------------------------- settings
     "Language": "زبان",
-    "Persian turns the whole app right-to-left.": "فارسی کل برنامه را راست‌به‌چپ می‌کند.",
+    "Persian turns the whole app right-to-left.": "با فارسی کل برنامه راست‌به‌چپ می‌شه.",
     "Your support keeps our servers running - thank you.":
-        "همایه‌ی شما باعث می‌شود سرورهای ما روشن بماند — سپاسگزاریم.",
+        "حمایت شما باعث می‌شه سرورهای ما روشن بمونه — سپاسگزاریم.",
     "Message sound": "صدای پیام",
     "On": "روشن",
     "Off": "خاموش",
-    "Test sound": "آزمایش صدا",
+    "Test sound": "تست صدا",
     "inside '{room}' - the room stays connected":
-        "داخل «{room}» هستید - اتصال اتاق برقرار است",
-    "Leaving {old} for {new}": "از {old} بیرون می‌رویم تا {new} باز شود",
-    "Open": "باز کردن",
+        "توی «{room}» هستی - اتصال اتاق برقراره",
+    "Leaving {old} for {new}": "از {old} می‌رم بیرون تا {new} باز بشه",
     "Language: {which}": "زبان: {which}",
     # ------------------------------------------------- in-app notices
     "Friend request": "درخواست دوستی",
-    "{name} wants to be your friend.": "{name} می‌خواهد دوست شما باشد.",
+    "{name} wants to be your friend.": "{name} می‌خواد دوستت باشه.",
     "New message": "پیام تازه",
     "Join request": "درخواست ورود",
-    "wants to join the room": "می‌خواهد وارد اتاق شود",
+    "wants to join the room": "می‌خواد وارد اتاق بشه",
     "Decline": "رد کردن",
     "Requests": "درخواست‌ها",
-    "{name} wants to join the room.": "{name} می‌خواهد وارد اتاق شود.",
+    "{name} wants to join the room.": "{name} می‌خواد وارد اتاق بشه.",
     "{name} is {what}": "{name} {what}",
     "let in": "پذیرفته شد",
     "turned away": "رد شد",
-    "Waiting to be let in ({n})": "در انتظار پذیرش ({n})",
-    "Nobody is waiting.": "کسی در انتظار نیست.",
+    "Waiting to be let in ({n})": "منتظر پذیرش ({n})",
+    "Nobody is waiting.": "کسی منتظر نیست.",
     "Waiting for the host of {room}": "در انتظار میزبانِ {room}",
-    "{who} let you into {room}": "{who} شما را به اتاق {room} راه داد",
-    "{who} did not let you in": "{who} شما را راه نداد",
+    "{who} let you into {room}": "{who} تو رو به اتاق {room} راه داد",
+    "{who} did not let you in": "{who} تو رو راه نداد",
     # ------------------------------------------------- the log, the chat, the panels
     "system": "سیستم",
-    "Room name and password are required.": "نام و رمز اتاق لازم است.",
+    "Room name and password are required.": "نام و رمز اتاق لازم‌ه.",
     "Still finishing the previous room - one moment.":
-        "اتاق قبلی هنوز بسته نشده - یک لحظه صبر کنید.",
-    "Left the room": "از اتاق خارج شدید",
-    "Not connected": "متصل نیستید",
+        "اتاق قبلی هنوز بسته نشده - یک لحظه صبر کن.",
+    "Left the room": "از اتاق خارج شدی",
+    "Not connected": "به سرور وصل نیستی",
     "Could not send - check the connection to the server":
-        "فرستاده نشد - اتصال به سرور را بررسی کنید",
+        "فرستاده نشد - اتصال به سرور رو بررسی کن",
     "Log copied to clipboard": "گزارش کپی شد",
-    "Collecting diagnostics (a few seconds)...": "در حال گردآوری اطلاعات (چند ثانیه)...",
+    "Collecting diagnostics (a few seconds)...": "دارم اطلاعات عیب‌یابی رو جمع می‌کنم (چند ثانیه)...",
     "Invite loaded - log in to join the room.":
-        "دعوت‌نامه آماده است - برای ورود به اتاق، وارد شوید.",
+        "دعوت آماده‌ست - برای ورود به اتاق وارد شو.",
     "This PC already has 3 accounts - sign in to one of them instead":
-        "این رایانه از قبل ۳ حساب دارد - به جای آن وارد یکی از حساب‌ها شوید",
+        "توی این سیستم از قبل ۳ حساب هست - وارد یکی از همونا شو",
     "This account was used to sign in on another device.":
-        "این حساب روی دستگاه دیگری وارد شده است.",
+        "این حساب توی دستگاه دیگه‌ای وارد شده.",
     "Connection to the server lost. Please log in again.":
-        "اتصال به سرور قطع شد. دوباره وارد شوید.",
+        "اتصال به سرور قطع شد. دوباره وارد شو.",
     "wintun.dll is required. Press the button again after you have it.":
-        "فایل wintun.dll لازم است. بعد از داشتن آن دوباره دکمه را بزنید.",
+        "فایل wintun.dll لازم‌ه. وقتی آماده شد دوباره دکمه رو بزن.",
     "Entering…": "در حال ورود…",
-    "Kick failed: {err}": "اخراج ناموفق بود: {err}",
-    "Ban failed: {err}": "مسدود کردن ناموفق بود: {err}",
-    "Unban failed: {err}": "رفع مسدودی ناموفق بود: {err}",
-    "Ban list failed: {err}": "نمایش لیست مسدودها ناموفق بود: {err}",
-    "Limit failed: {err}": "تعیین سقف ناموفق بود: {err}",
-    "Admin update failed: {err}": "تغییر مدیر ناموفق بود: {err}",
+    "Kick failed: {err}": "اخراج انجام نشد: {err}",
+    "Ban failed: {err}": "مسدود نشد: {err}",
+    "Unban failed: {err}": "رفع مسدودی نشد: {err}",
+    "Ban list failed: {err}": "لیست مسدودها نیامد: {err}",
+    "Limit failed: {err}": "سقف تنظیم نشد: {err}",
+    "Admin update failed: {err}": "تغییر مدیر انجام نشد: {err}",
     "User {name} unbanned": "مسدودی {name} برداشته شد",
     "by {who}  ·  {why}": "توسط {who}  ·  {why}",
-    "Diagnostics ZIP saved: {path}": "بسته اطلاعات تشخیصی ذخیره شد: {path}",
+    "Diagnostics ZIP saved: {path}": "فایل عیب‌یابی ذخیره شد: {path}",
     # ------------------------------------------------- what the log and notices say
-    "Could not answer the request: {err}": "نتوانستم درخواست را پاسخ دهم: {err}",
+    "Could not answer the request: {err}": "نتونستم جواب درخواست رو بدم: {err}",
     "Layout: {e}": "چیدمان: {e}",
-    "Logged in as {name}": "وارد شدید: {name}",
+    "Logged in as {name}": "وارد شدی: {name}",
     "Connecting to room '{room}'...": "در حال ورود به اتاق '{room}'...",
-    "Create room failed: {err}": "ساخت اتاق ناموفق بود: {err}",
-    "Join failed: {err}": "ورود به اتاق ناموفق بود: {err}",
-    "Removed '{room}' from your rooms": "اتاق '{room}' از اتاق‌های شما برداشته شد",
-    "Remove failed: {err}": "برداشتن ناموفق بود: {err}",
-    "{cmd} failed: {err}": "{cmd} ناموفق بود: {err}",
-    "{name} is now your friend": "{name} اکنون دوست شماست",
-    "Invite sent to {name}": "دعوت‌نامه برای {name} فرستاده شد",
-    "Invite failed: {err}": "فرستادن دعوت‌نامه ناموفق بود: {err}",
-    "You were kicked from the room by {by}": "شما به دست {by} از اتاق اخراج شدید",
-    "You were banned from the room by {by} ({reason})": "شما به دست {by} از اتاق مسدود شدید ({reason})",
-    "You were kicked by {by}.": "شما به دست {by} اخراج شدید.",
-    "You were banned by {by} ({reason}).": "شما به دست {by} مسدود شدید ({reason}).",
+    "Create room failed: {err}": "اتاق ساخته نشد: {err}",
+    "Join failed: {err}": "ورود به اتاق انجام نشد: {err}",
+    "Removed '{room}' from your rooms": "اتاق '{room}' از اتاق‌هایت برداشته شد",
+    "Remove failed: {err}": "برداشته نشد: {err}",
+    "{cmd} failed: {err}": "{cmd} انجام نشد: {err}",
+    "{name} is now your friend": "{name} الان دوستته",
+    "Invite sent to {name}": "دعوت برای {name} فرستاده شد",
+    "Invite failed: {err}": "دعوت فرستاده نشد: {err}",
+    "You were kicked from the room by {by}": "{by} تو رو از اتاق اخراج کرد",
+    "You were banned from the room by {by} ({reason})": "{by} تو رو از اتاق مسدود کرد ({reason})",
+    "You were kicked by {by}.": "{by} تو رو اخراج کرد.",
+    "You were banned by {by} ({reason}).": "{by} تو رو مسدود کرد ({reason}).",
     "{name} went offline: {why}": "{name} آفلاین شد: {why}",
-    "{who} sent you a friend request": "{who} برای شما درخواست دوستی فرستاد",
-    "{who} is not online - your message was not delivered": "{who} آنلاین نیست - پیام شما نرسید",
-    "Chat failed: {err}": "گفتگو ناموفق بود: {err}",
-    "{who} invited you to the room '{room}'": "{who} شما را به اتاق '{room}' دعوت کرد",
+    "{who} sent you a friend request": "{who} برایت درخواست دوستی فرستاد",
+    "{who} is not online - your message was not delivered": "{who} آنلاین نیست - پیامت نرسید",
+    "Chat failed: {err}": "گفتگو انجام نشد: {err}",
+    "{who} invited you to the room '{room}'": "{who} تو رو به اتاق '{room}' دعوت کرد",
     "Connection to the server lost: {why}": "اتصال به سرور قطع شد: {why}",
     "entering '{room}' - preparing the virtual adapter...":
-        "وارد شدن به '{room}' - در حال آماده کردن کارت مجازی...",
+        "وارد '{room}' می‌شم - دارم کارت شبکه‌ی مجازی رو آماده می‌کنم...",
     # ------------------------------------------------- the password card
-    "Current password": "رمز عبور فعلی",
-    "New password": "رمز عبور جدید",
-    "New password again": "تکرار رمز عبور جدید",
-    "Change password": "تغییر رمز عبور",
-    "Fill in the current and the new password.": "رمز فعلی و رمز جدید را بنویسید.",
-    "The two new passwords do not match.": "دو رمز جدید یکسان نیستند.",
-    "You are not signed in.": "وارد نشده‌اید.",
-    "Password changed OK": "رمز عبور تغییر کرد ✓",
-    "Your password was changed": "رمز عبور شما تغییر کرد",
-    "Current password is wrong": "رمز عبور فعلی درست نیست",
+    "Current password": "رمز فعلی",
+    "New password": "رمز جدید",
+    "New password again": "تکرار رمز جدید",
+    "Change password": "تغییر رمز",
+    "Fill in the current and the new password.": "رمز فعلی و رمز جدید را بنویس.",
+    "The two new passwords do not match.": "دو رمز جدید یکی نیستن.",
+    "You are not signed in.": "وارد نشده‌ای.",
+    "Password changed OK": "رمز تغییر کرد ✓",
+    "Your password was changed": "رمزت عوض شد",
+    "Current password is wrong": "رمز فعلی درست نیست",
     "New password must be at least 6 characters":
-        "رمز جدید باید دست‌کم ۶ نویسه باشد",
-    "The new password is the same as the old one": "رمز جدید با رمز قبلی یکی است",
+        "رمز جدید باید حداقل ۶ کاراکتر باشه",
+    "The new password is the same as the old one": "رمز جدید با قبلی یکی‌ه",
     # ------------------------------------------------- the management panel
     "Management": "مدیریت",
     "Open the console": "باز کردن کنسول",
-    "This account is one the team vouched for.": "این حساب مورد تأیید تیم است.",
+    "This account is one the team vouched for.": "این حساب رو تیم تأیید کرده.",
     "The network, for the team": "شبکه، از نگاه تیم",
     "Refresh": "به‌روزرسانی",
     "Loading {what}...": "در حال بارگذاری {what}...",
@@ -1505,20 +1573,22 @@ TR = {
     "ID": "شناسه",
     "Last seen": "آخرین بازدید",
     "Made": "ساخته",
-    "PC": "رایانه",
+    "PC": "سیستم",
     "Online": "آنلاین",
     "Data": "حجم",
     "Team": "تیم",
     "Limit": "سقف",
-    "Day": "روز",
+    "Day": "امروز",
     "Search...": "جستجو...",
-    "Management access for this account changed": "دسترسی مدیریت این حساب تغییر کرد",
-    "The server refused that.": "سرور این کار را نپذیرفت.",
-    "Use a whole number from 2 to 64": "یک عدد صحیح بین ۲ تا ۶۴ بنویسید.",
-    "A room name is 1-32 characters": "نام اتاق باید ۱ تا ۳۲ نویسه باشد.",
+    "Management access for this account changed": "دسترسی مدیریت این حساب عوض شد",
+    "The server refused that.": "سرور این کار رو نپذیرفت.",
+    "Use a whole number from 2 to 64": "یک عدد صحیح بین ۲ تا ۶۴ بنویس.",
+    "A room name is 1-32 characters": "نام اتاق باید ۱ تا ۳۲ کاراکتر باشه.",
     "Delete": "حذف",
-    "Sure?": "مطمئنید؟",
+    "Sure?": "مطمئنی؟",
     "Close chat": "بستن گفتگو",
+    "(management)": "(مدیریت)",
+    "Enter room": "ورود به اتاق",
 }
 # a segmented button hands back whatever it shows, so the handlers need the way home
 UNTR = {v: k for k, v in reversed(list(TR.items()))}
@@ -1530,18 +1600,28 @@ def un(value):
 
 
 def T(s):
-    """Translate a fixed English string; anything dynamic passes straight through."""
+    """Translate a fixed English string; anything dynamic passes straight through. The
+    Persian that comes back is written the way Tk has to be given it."""
     if LANG[0] == "en" or not isinstance(s, str):
         return s
-    return TR.get(s, s)
+    return bidi(TR.get(s, s))
+
+
+class word(str):
+    """A piece of a line that is a word of the interface rather than a fact from the server.
+    Marking it lets a line told later be told in the new language too - a room name or a
+    username is never translated, but "let in" and "timeout" are."""
 
 
 def fmt(template, **kw):
-    """Translate the sentence shape first, then fill it in, so the word order can be
-    different in Persian without breaking the value."""
+    """Translate the sentence shape first, then fill it in, so the word order can be different
+    in Persian without breaking the value. A filled-in line usually carries a name or a number
+    in Latin letters, and that is exactly what makes Tk lay the line out the wrong way round -
+    so bidi() hands the pieces over in the order it has to be given them."""
     if LANG[0] == "en":
         return template.format(**kw)
-    return TR.get(template, template).format(**kw)
+    return bidi(TR.get(template, template).format(
+        **{k: (T(v) if isinstance(v, word) else v) for k, v in kw.items()}))
 
 
 def flip(opts, rtl):
@@ -1692,19 +1772,32 @@ def _mirror_one(k, mgr, rtl, cols):
     _move(k, mgr, cur, want)
 
 
+def _group_order(w, group):
+    """The stack the way it really sits. pack_slaves is the stacking order - the order the
+    code packed them, with every before= and after= obeyed - while winfo_children is only the
+    order they were born in. Reading the wrong one is how the player list ended up under the
+    "waiting for your friends" line: that caption was built before any player, so birth order
+    put it at the head of the column in both languages."""
+    try:
+        slaves = list(w.pack_slaves())
+    except Exception:
+        slaves = []
+    in_group = {id(k) for k in group}
+    seen = {id(k) for k in slaves if id(k) in in_group}
+    return [k for k in slaves if id(k) in in_group] + [k for k in group if id(k) not in seen]
+
+
 def _mirror_pack_group(w, kids, rtl, cols):
     """Move a whole packed column at once. pack puts a widget at the END of its side's stack,
     so re-packing only the ones that changed would shuffle the rest of the column - which is
-    how the landing menu ended up with its friend list above the logo. The order the code
-    packed them in is remembered and written back with after=, so the stack keeps its shape
-    in both languages."""
+    how the landing menu ended up with its friend list above the logo. The order they stand in
+    now is read from the packer itself and written back with after=, so the stack keeps its
+    shape in both languages: turning a column round flips which side it grows from, never
+    which line is first."""
     group = [k for k, m in kids if m == "pack"]
     if not group:
         return
-    base = w.__dict__.get("_ord0")
-    if base is None:
-        base = w.__dict__["_ord0"] = list(group)
-    order = [k for k in base if k in group] + [k for k in group if k not in base]
+    order = _group_order(w, group)
     plans, move = [], False
     for k in order:
         plan = _plan(k, "pack", rtl, cols)
@@ -1830,8 +1923,20 @@ def mirror_tree(w, rtl):
 def retext_tree(w):
     """Hand every widget its words back in the language we are drawing in now."""
     for k in w.winfo_children():
+        made = k.__dict__.get("_src_fmt")
         src = k.__dict__.get("_src")
-        if src is not None:
+        if made is not None:
+            try:
+                say = fmt(made[0], **made[1])      # the sentence built again, in the new words
+                k.configure(text=say)
+                k.__dict__.setdefault("_last", {})["text"] = say
+                if isinstance(k, Label):
+                    k.rejust()
+                if isinstance(k, Btn):
+                    k.refit()
+            except Exception:
+                pass
+        elif src is not None:
             try:
                 k.configure(text=T(src))
                 k.__dict__.setdefault("_last", {})["text"] = T(src)
@@ -2084,6 +2189,9 @@ class Splitter(ctk.CTkFrame):
 ROLE_BADGE = {"owner": ("👑 Owner", GOLD), "admin": ("🛡 Admin", BLUE), "member": ("Member", MUTED)}
 # the word that trails a name wherever the roster or a chat line shows it
 RANK_MARK = {"owner": "(owner)", "admin": "(admin)"}
+# the team, standing inside someone else's room: every permission, and said in red
+MGR_BADGE = ("Management", NAME_RED)
+MGR_MARK = "(management)"
 
 
 def by_name(entry):
@@ -2100,16 +2208,23 @@ def by_role(entry):
             by_name(entry))
 
 
-def rank_mark(role):
-    return RANK_MARK.get(role or "member", "")
+def rank_mark(role, mgr=False):
+    return MGR_MARK if mgr else RANK_MARK.get(role or "member", "")
 
 
-def with_rank(name, role):
+def rank_color(role, mgr=False):
+    """The colour a rank is written in - and the team's own word is always red."""
+    if mgr:
+        return NAME_RED
+    return GOLD if role == "owner" else BLUE if role == "admin" else MUTED
+
+
+def with_rank(name, role, mgr=False):
     """A name and the word that trails it. Here the mark is translated on the way in: this
     builds a sentence the code shows as it stands, and only a widget's own text is re-read
     in the other language when the app switches."""
-    mark = rank_mark(role)
-    return f"{name}  {T(mark)}" if mark else name
+    mark = rank_mark(role, mgr)
+    return bidi(f"{name}  {T(mark)}") if mark else name
 
 
 class App(ctk.CTk):
@@ -2123,6 +2238,8 @@ class App(ctk.CTk):
         self.minsize(920, 620)
         self.configure(fg_color=BG)
         self.closing, self.last_log, self.empty_on = False, "", False
+        self.log_src = deque(maxlen=1500)   # every line in the words it was written in,
+                                            # so the log can be said again in the new language
         self.ui_err_t, self.hangf = 0.0, None
         self.frozen_before, self.fa_font = "", None
         # a frozen UI is the one thing worth writing outside the app folder: it lands in the
@@ -2232,6 +2349,18 @@ class App(ctk.CTk):
     def q_put(self, s):
         self.q.put(mask_net(s))        # the address of the network never reaches a screen
 
+    def q_putf(self, template, **pieces):
+        """A log line said from a template. Keeping the shape and its pieces, instead of the
+        finished sentence, is what lets the log be told again after a language switch."""
+        self.q.put((template, {k: mask_net(v) if isinstance(v, str) else v
+                               for k, v in pieces.items()}))
+
+    def say(self, item):
+        """One stored log line, in the language the app is drawn in now."""
+        if isinstance(item, tuple):
+            return fmt(item[0], **item[1])
+        return T(item)
+
     # ------------------------------------------------------------ small helpers
     def cap(self, parent, text):
         Label(parent, text=text, font=(FONT, 12), text_color=MUTED, anchor="w").pack(
@@ -2305,13 +2434,14 @@ class App(ctk.CTk):
 
     def page_head(self, parent, title):
         """The first line of a page. The name of the app is already in the bar above it, so
-        this says only where you are - and who to thank for the machine answering."""
+        this says only where you are - and who to thank for the machine answering. The place
+        comes first, in the corner a reader starts from, and the thanks trail behind it."""
         h = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=0, border_width=1, border_color=LINE)
         h.pack(fill="x")
         row = ctk.CTkFrame(h, fg_color="transparent")
         row.pack(fill="x", padx=14, pady=9)
-        self.support_line(row).pack(side="left")
-        Label(row, text=title, font=(FONT, 13, "bold"), text_color=MUTED).pack(side="right")
+        Label(row, text=title, font=(FONT, 13, "bold"), text_color=MUTED).pack(side="left")
+        self.support_line(row).pack(side="right")
         return h
 
     # ------------------------------------------------------------ top navigation
@@ -2515,10 +2645,10 @@ class App(ctk.CTk):
         def work():
             r = self.link.req("join_resp", room=rq["room"], user=rq["id"], accept=accept)
             if not r.get("ok"):
-                self.q_put(fmt("Could not answer the request: {err}", err=r.get("err")))
+                self.q_putf("Could not answer the request: {err}", err=r.get("err"))
                 return
-            self.q_put(fmt("{name} is {what}", name=rq["name"],
-                           what=T("let in") if accept else T("turned away")))
+            self.q_putf("{name} is {what}", name=rq["name"],
+                        what=word("let in") if accept else word("turned away"))
             self.uq.put({"t": "jreq_upd", "room": rq["room"], "requests": r.get("requests", [])})
         threading.Thread(target=work, daemon=True).start()
 
@@ -2940,7 +3070,7 @@ class App(ctk.CTk):
         cfg["lang"] = lang
         save_cfg(cfg)
         self.relayout()
-        self.q_put(fmt("Language: {which}", which="Persian" if lang == "fa" else "English"))
+        self.q_putf("Language: {which}", which="Persian" if lang == "fa" else "English")
 
     def change_password(self):
         """The account's own password, changed from Settings. The current one is asked for,
@@ -3007,48 +3137,75 @@ class App(ctk.CTk):
             FONT = want
             refamily(self, want)
 
+    def _dim(self, off):
+        """Fade the window - and every floating card with it - out and back. Turning the
+        language over moves about every widget the app has, and a player watching that happen
+        sees a stumble: hundreds of small jumps over half a second. Hidden while the tree is
+        turned round, the two languages simply trade places."""
+        for w in [self] + [k for k in self.winfo_children() if isinstance(k, tk.Toplevel)]:
+            try:
+                if w.winfo_exists():
+                    w.attributes("-alpha", 0.0 if off else 1.0)
+            except Exception:
+                pass
+
     def relayout(self):
         """Answer the whole app in the language just picked: pen and words first, then every
         row that carries text is built anew, and only then does the mirror move what survives.
         Mirroring a widget that is about to be destroyed leaves customtkinter redrawing a
         canvas that is gone - a crash, and a card whose border never finished drawing."""
         rtl = LANG[0] == "fa"
-        self.apply_font()
+        self._dim(True)
         try:
-            retext_tree(self)
-        except Exception as e:
-            self.q_put(fmt("Layout: {e}", e=e))
-        for fn in (self.update_tabs, self.update_badges, self.rebuild_friends,
-                   self.pm_show, lambda: self.show_page(self.page)):
+            self.apply_font()
             try:
-                fn()
+                retext_tree(self)
+            except Exception as e:
+                self.q_putf("Layout: {e}", e=e)
+            for fn in (self.update_tabs, self.update_badges, self.rebuild_friends,
+                       self.pm_show, lambda: self.show_page(self.page),
+                       lambda: self.node and self.update_room(self.node)):
+                try:
+                    fn()
+                except Exception:
+                    pass
+            try:
+                if self.my_rooms is not None:
+                    for row in self.room_rows.values():
+                        row["sig"] = None          # say every landing row again, in the new words
+                    self.on_my_rooms(self.my_rooms)
             except Exception:
                 pass
-        try:
-            if self.my_rooms is not None:
-                for row in self.room_rows.values():
-                    row["sig"] = None          # say every landing row again, in the new words
-                self.on_my_rooms(self.my_rooms)
-        except Exception:
-            pass
-        try:
-            if self.node:
-                self.role_key = None      # the rows carry words too, so build them anew
-                self.update_room_rows()
-        except Exception:
-            pass
-        try:
-            if self.cwin and self.cwin.winfo_exists():
-                if self.con_last:
-                    self.console_ready(*self.con_last)   # the table and its note, in the new words
-                else:
-                    self.console_draw()
-        except Exception:
-            pass
-        try:
-            self.mirror_all(rtl)
-        except Exception as e:
-            self.q_put(fmt("Layout: {e}", e=e))
+            try:
+                if self.node:
+                    self.role_key = None      # the rows carry words too, so build them anew
+                    self.update_room_rows()
+            except Exception:
+                pass
+            try:
+                if self.cwin and self.cwin.winfo_exists():
+                    if self.con_last:
+                        self.console_ready(*self.con_last)   # the table and its note, in the new words
+                    else:
+                        self.console_draw()
+            except Exception:
+                pass
+            try:
+                self.redraw_log()      # the history is told again, in the words just picked
+            except Exception:
+                pass
+            try:
+                self.mirror_all(rtl)
+            except Exception as e:
+                self.q_putf("Layout: {e}", e=e)
+        finally:
+            # every move is on the books before the window is shown again, so the new language
+            # arrives as one picture instead of a series of half-finished ones
+            try:
+                self.update_idletasks()
+            except Exception:
+                pass
+            self._dim(False)
 
     # ------------------------------------------------------------ pages
     def show_page(self, name):
@@ -3064,8 +3221,10 @@ class App(ctk.CTk):
         self.body.pack(fill="both", expand=True)
         if name == "room":
             role = (self.node.room.get("my_role") if self.node else None) or "member"
-            badge, color = ROLE_BADGE.get(role, ROLE_BADGE["member"])
-            setw(self.lbl_role, text=badge, fg_color=(ACC if role == "owner" else BLUE if role == "admin" else CARD2),
+            mgr = self.is_mgr()
+            badge, color = MGR_BADGE if mgr else ROLE_BADGE.get(role, ROLE_BADGE["member"])
+            setw(self.lbl_role, text=badge, fg_color=(color if mgr else
+                                                      (ACC if role == "owner" else BLUE if role == "admin" else CARD2)),
                  text_color=(TXT if role == "member" else ACC_TXT if role == "owner" else "white"))
             self.lbl_room.configure(text=self.room_name)
             self.row_host.pack_forget()
@@ -3104,12 +3263,12 @@ class App(ctk.CTk):
         setw(self.lbl_login_err, text="")
         setw(self.lbl_nav_acct, text=self.my_name)
         setw(self.lbl_acct_name, text=self.my_name)
-        setw(self.lbl_acct, text=fmt("{app} network online", app=APP_NAME))
+        setf(self.lbl_acct, "{app} network online", {"app": APP_NAME})
         self.blink_on = True
         self.blink_tick()
         self.tab = "start"
         self.show_page("start")
-        self.q_put(fmt("Logged in as {name}", name=self.my_name))
+        self.q_putf("Logged in as {name}", name=self.my_name)
         self.refresh_rooms()
         self.refresh_friends()
         if self.pending_enter:
@@ -3276,7 +3435,8 @@ class App(ctk.CTk):
                 self.await_enter = None
                 self.tab = "room"
                 self.after(60, lambda: self.enter_room(r))
-        setw(self.lbl_rooms_count, text=fmt("{n} / {m} rooms", n=len(self.my_rooms), m=MAX_ROOMS))
+        setf(self.lbl_rooms_count, "{n} / {m} rooms",
+             {"n": len(self.my_rooms), "m": MAX_ROOMS})
         alive = set()
         for room in self.my_rooms:
             rid = room.get("id")
@@ -3322,7 +3482,7 @@ class App(ctk.CTk):
                 self.invite_text = r["invite"]
                 self.uq.put({"t": "enter_room", "room": r["room"]})
             else:
-                self.q_put(fmt("Create room failed: {err}", err=r.get("err")))
+                self.q_putf("Create room failed: {err}", err=r.get("err"))
         threading.Thread(target=work, daemon=True).start()
 
     def join_link(self):
@@ -3350,14 +3510,14 @@ class App(ctk.CTk):
                 else:
                     self.uq.put({"t": "enter_room", "room": r["room"]})
             else:
-                self.q_put(fmt("Join failed: {err}", err=r.get("err")))
+                self.q_putf("Join failed: {err}", err=r.get("err"))
         threading.Thread(target=work, daemon=True).start()
 
     def set_invite(self, inv):
         self.invite = inv
         if inv:
-            setw(self.lbl_invite, text=fmt("{who} invited you to the room '{room}'",
-                                            who=inv["from"], room=inv["room"]))
+            setf(self.lbl_invite, "{who} invited you to the room '{room}'",
+                 {"who": inv["from"], "room": inv["room"]})
             self.inv_bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=16, pady=(16, 0))
         else:
             self.inv_bar.grid_forget()
@@ -3369,9 +3529,9 @@ class App(ctk.CTk):
         def work():
             r = self.link.req("remove_room", room=room["id"])
             if r.get("ok"):
-                self.q_put(fmt("Removed '{room}' from your rooms", room=room["name"]))
+                self.q_putf("Removed '{room}' from your rooms", room=room["name"])
             else:
-                self.q_put(fmt("Remove failed: {err}", err=r.get("err")))
+                self.q_putf("Remove failed: {err}", err=r.get("err"))
             self.refresh_rooms()
         threading.Thread(target=work, daemon=True).start()
 
@@ -3385,8 +3545,8 @@ class App(ctk.CTk):
         if self.node:
             old = self.node
             self.node, self.busy, self.room_name = None, True, room["name"]
-            self.q_put(fmt("Leaving {old} for {new}", old=old.room.get("name", "?"),
-                           new=room["name"]))
+            self.q_putf("Leaving {old} for {new}", old=old.room.get("name", "?"),
+                           new=room["name"])
             self.clear_hint("join")
 
             def switch():
@@ -3493,7 +3653,7 @@ class App(ctk.CTk):
             return
         self.copy_text(code)
         self.flash(self.b_inv, "Copied ✓")
-        self.q_put(fmt("Invite code copied - send it to a friend"))
+        self.q_putf("Invite code copied - send it to a friend")
 
     # ------------------------------------------------------------ management console
     CON_VIEWS = ("Users", "Rooms", "Traffic")
@@ -3509,7 +3669,7 @@ class App(ctk.CTk):
                   ("created", "Made", 140)),
         "Traffic": (("name", "Name", 0), ("day", "Day", 140), ("bytes", "Data", 80)),
     }
-    CON_ACT = {"Users": (142,), "Rooms": (96, 92), "Traffic": ()}
+    CON_ACT = {"Users": (142,), "Rooms": (96, 92, 116), "Traffic": ()}
 
     def admin(self, cmd):
         """One line to the server's management commands, over the same encrypted channel.
@@ -3710,6 +3870,9 @@ class App(ctk.CTk):
                     dele = self.btn(row, "Delete", None, "#c0392b", "#a93226", h=26, width=84)
                     dele.configure(command=lambda rid=r.get("id"), b=dele: self.drop_room(rid, b))
                     dele.grid(row=0, column=len(cols) + 1, padx=(0, 6), pady=4)
+                    self.btn(row, "Enter room", lambda rid=r.get("id"): self.enter_room_admin(rid),
+                             CARD2, LINE, h=26, width=110).grid(row=0, column=len(cols) + 2,
+                                                                padx=(0, 6), pady=4)
 
     def set_team(self, who, on):
         """Move one account in or out of the team. The server only ever listens when the
@@ -3724,6 +3887,14 @@ class App(ctk.CTk):
         if not str(limit).isdigit() or not (2 <= int(limit) <= 64):
             return self.notify("Management", T("Use a whole number from 2 to 64"))
         self.send_admins([f"set room {rid} {name}", f"set limit {rid} {limit}"])
+
+    def enter_room_admin(self, rid):
+        """Step into a room the team does not own - from the panel, without a password and
+        without asking the host. Inside, every permission of that room is theirs."""
+        def work():
+            r = self.admin(f"enter room {rid}")
+            self.uq.put({"t": "con_enter", "r": r})
+        threading.Thread(target=work, daemon=True).start()
 
     def drop_room(self, rid, b):
         """Deleting a room is not one click: the button asks first, and forgets the question
@@ -3769,10 +3940,15 @@ class App(ctk.CTk):
     def my_role(self):
         return (self.node.room.get("my_role") if self.node else None) or "member"
 
+    def is_mgr(self):
+        """The team, standing in a room they do not own: every permission is theirs, and
+        the room says so in red beside their name."""
+        return bool(((self.node.room if self.node else {}).get("my_perms") or {}).get("manage"))
+
     def my_perms(self):
         room = self.node.room if self.node else {}
-        if self.my_role() == "owner":
-            return {k: True for k in PERM_LABELS}
+        if self.my_role() == "owner" or self.is_mgr():
+            return dict({k: True for k in PERM_LABELS}, manage=True)
         got = room.get("my_perms") or {}
         # a server that has never heard of inviting still answers the old five ticks, and
         # an admin of such a room may moderate exactly as it always could - but not invite
@@ -3801,7 +3977,7 @@ class App(ctk.CTk):
         def work():
             r = self.link.req("kick", room=rid, user=uid)
             if not r.get("ok"):
-                self.q_put(fmt("Kick failed: {err}", err=r.get("err")))
+                self.q_putf("Kick failed: {err}", err=r.get("err"))
         threading.Thread(target=work, daemon=True).start()
 
     def ban_user(self, uid):
@@ -3816,7 +3992,7 @@ class App(ctk.CTk):
         def work():
             r = self.link.req("ban", room=rid, user=uid, reason=reason)
             if not r.get("ok"):
-                self.q_put(fmt("Ban failed: {err}", err=r.get("err")))
+                self.q_putf("Ban failed: {err}", err=r.get("err"))
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ admin panel
@@ -3875,7 +4051,7 @@ class App(ctk.CTk):
             if r.get("ok"):
                 self.uq.put({"t": "ban_list", "bans": r["bans"]})
             else:
-                self.q_put(fmt("Ban list failed: {err}", err=r.get("err")))
+                self.q_putf("Ban list failed: {err}", err=r.get("err"))
         threading.Thread(target=work, daemon=True).start()
 
     def admin_clear(self, heading=""):
@@ -3915,7 +4091,7 @@ class App(ctk.CTk):
                 def work():
                     r = self.link.req("set_limit", room=self.node.rid, limit=v)
                     if not r.get("ok"):
-                        self.q_put(fmt("Limit failed: {err}", err=r.get("err")))
+                        self.q_putf("Limit failed: {err}", err=r.get("err"))
                 threading.Thread(target=work, daemon=True).start()
             self.btn(row, "Set", set_limit, CARD2, LINE, h=32, width=60).pack(side="left")
             self.cap(body, "Members - tap a rank or a permission to change it")
@@ -4035,7 +4211,7 @@ class App(ctk.CTk):
         def work():
             r = self.link.req("set_perms", room=rid, user=uid, perms=perms)
             if not r.get("ok"):
-                self.q_put(fmt("Permission failed: {err}", err=r.get("err")))
+                self.q_putf("Permission failed: {err}", err=r.get("err"))
         threading.Thread(target=work, daemon=True).start()
 
     def req_admin(self, uid, admin, perms):
@@ -4046,7 +4222,7 @@ class App(ctk.CTk):
         def work():
             r = self.link.req("set_admin", room=rid, user=uid, admin=admin, perms=perms)
             if not r.get("ok"):
-                self.q_put(fmt("Admin update failed: {err}", err=r.get("err")))
+                self.q_putf("Admin update failed: {err}", err=r.get("err"))
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ ban panel
@@ -4073,10 +4249,10 @@ class App(ctk.CTk):
                 def work():
                     rr = self.link.req("unban", room=self.node.rid, user=q)
                     if rr.get("ok"):
-                        self.q_put(fmt("User {name} unbanned", name=q))
+                        self.q_putf("User {name} unbanned", name=q)
                         self.refresh_bans()
                     else:
-                        self.q_put(fmt("Unban failed: {err}", err=rr.get("err")))
+                        self.q_putf("Unban failed: {err}", err=rr.get("err"))
                 threading.Thread(target=work, daemon=True).start()
             if can:
                 self.btn(r, "Unban", unban, CARD2, LINE, h=30, width=80).pack(side="right", padx=12, pady=8)
@@ -4184,11 +4360,11 @@ class App(ctk.CTk):
         def work():
             r = self.link.req(cmd, user=name, **kw)
             if not r.get("ok"):
-                self.q_put(fmt("{cmd} failed: {err}", cmd=cmd.replace("_", " "), err=r.get("err")))
+                self.q_putf("{cmd} failed: {err}", cmd=cmd.replace("_", " "), err=r.get("err"))
                 return
             self.friend_apply(r)
             if cmd == "add_friend" and r.get("accepted"):
-                self.q_put(fmt("{name} is now your friend", name=name))
+                self.q_putf("{name} is now your friend", name=name)
         threading.Thread(target=work, daemon=True).start()
 
     def rebuild_friends(self):
@@ -4359,9 +4535,9 @@ class App(ctk.CTk):
         def work():
             r = self.link.req("invite", user=name, room=self.node.rid)
             if r.get("ok"):
-                self.q_put(fmt("Invite sent to {name}", name=name))
+                self.q_putf("Invite sent to {name}", name=name)
             else:
-                self.q_put(fmt("Invite failed: {err}", err=r.get("err")))
+                self.q_putf("Invite failed: {err}", err=r.get("err"))
         threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------ chat
@@ -4379,7 +4555,7 @@ class App(ctk.CTk):
         j = "rtl" if rtl else "ltr"
         box.configure(state="normal")
         box.insert("end", f"{who}  {stamp}\n", (tag, j))
-        box.insert("end", (f"\u200f{text}\u200f" if rtl else text) + "\n\n", ("body", j))
+        box.insert("end", bidi(text) + "\n\n", ("body", j))
         box.mark_set("insert", "end-1c")      # no stray caret in the read-only log
         box.see("end")
         box.configure(state="disabled")
@@ -4434,6 +4610,21 @@ class App(ctk.CTk):
             self.chat_add("system", "Could not send - check the connection to the server", "sys")
 
     # ------------------------------------------------------------ logs
+    def redraw_log(self):
+        """The log is words too. Its lines are kept in the language they were written in, so
+        turning the app over says the whole history again - in the new language, in the order
+        the new language reads, and ready to be copied without a scramble."""
+        try:
+            self.logbox.configure(state="normal")
+            self.logbox.delete("1.0", "end")
+            for stamp, raw in self.log_src:
+                line = stamp + self.say(raw) + "\n"
+                self.logbox.insert("end", line, ("rtl" if has_rtl(line) else "ltr",))
+            self.logbox.see("end")
+            self.logbox.configure(state="disabled")
+        except Exception:
+            pass
+
     def copy_log(self):
         self.clipboard_clear()
         self.clipboard_append(self.logbox.get("1.0", "end"))
@@ -4467,7 +4658,7 @@ class App(ctk.CTk):
                             z.writestr(fname, oem_decode(sh(cmd).stdout))
                         except Exception as ex:
                             z.writestr(fname, f"failed: {ex}")
-                self.q_put(fmt("Diagnostics ZIP saved: {path}", path=path))
+                self.q_putf("Diagnostics ZIP saved: {path}", path=path)
                 subprocess.Popen(f'explorer /select,"{path}"')
             except Exception:
                 self.q_put(f"ZIP export failed:\n{traceback.format_exc()}")
@@ -4515,9 +4706,12 @@ class App(ctk.CTk):
         lines = []
         while True:
             try:
-                lines.append(time.strftime("%H:%M:%S ") + T(self.q.get_nowait()) + "\n")
+                raw = self.q.get_nowait()
             except queue.Empty:
                 break
+            stamp = time.strftime("%H:%M:%S ")
+            self.log_src.append((stamp, raw))
+            lines.append(stamp + self.say(raw) + "\n")
         if lines:
             self.last_log = lines[-1][9:].split("\n", 1)[0][:90]
             self.logbox.configure(state="normal")
@@ -4569,6 +4763,10 @@ class App(ctk.CTk):
         elif t == "con_done":
             self.console_answer(ev["r"])
             self.console_load()
+        elif t == "con_enter":
+            self.console_answer(ev["r"])
+            if ev["r"].get("ok") and ev["r"].get("room"):
+                self.enter_room(ev["r"]["room"])      # leaves whatever room this is now
         elif t == "staff":
             self.on_staff(ev)
         elif t == "my_rooms":
@@ -4608,15 +4806,15 @@ class App(ctk.CTk):
                 self.cq.put((who, ev.get("text", ""), ev.get("ts")))
         elif t == "kicked":
             if self.node and ev.get("room") == self.node.rid:
-                self.q_put(fmt("You were kicked from the room by {by}", by=ev.get("by")))
+                self.q_putf("You were kicked from the room by {by}", by=ev.get("by"))
                 self.chat_add("system", fmt("You were kicked by {by}.", by=ev.get("by")), "sys")
                 self.tab = "start"
                 self.leave()
                 self.refresh_rooms()
         elif t == "banned":
             if self.node and ev.get("room") == self.node.rid:
-                self.q_put(fmt("You were banned from the room by {by} ({reason})",
-                       by=ev.get("by"), reason=ev.get("reason") or "no reason"))
+                self.q_putf("You were banned from the room by {by} ({reason})",
+                       by=ev.get("by"), reason=ev.get("reason") or "no reason")
                 self.chat_add("system", fmt("You were banned by {by} ({reason}).",
                                       by=ev.get("by"), reason=ev.get("reason") or "no reason"), "sys")
                 self.tab = "start"
@@ -4635,7 +4833,7 @@ class App(ctk.CTk):
                 self.q_put(ev.get("err") or "Saving the defaults failed")
         elif t == "member_offline":
             why = ev.get("reason") or "timeout"
-            self.q_put(fmt("{name} went offline: {why}", name=ev.get("name", "?"), why=T(why)))
+            self.q_putf("{name} went offline: {why}", name=ev.get("name", "?"), why=word(why))
         elif t == "peer_timeout":
             why = ev.get("reason") or "timeout"
             self.chat_add("system", f"{ev.get('name', '?')} - {T(why)}", "sys")
@@ -4650,13 +4848,13 @@ class App(ctk.CTk):
                         keep=30, kind="join")
         elif t == "join_ok":
             self.clear_hint("join")           # the answer is here: the waiting line is done
-            self.q_put(fmt("{who} let you into {room}", who=ev.get("by", "?"),
-                           room=ev.get("name", "")))
+            self.q_putf("{who} let you into {room}", who=ev.get("by", "?"),
+                           room=ev.get("name", ""))
             self.await_enter = ev.get("room")
             self.refresh_rooms(True)
         elif t == "join_no":
             self.clear_hint("join")
-            self.q_put(fmt("{who} did not let you in", who=ev.get("by", "?")))
+            self.q_putf("{who} did not let you in", who=ev.get("by", "?"))
         elif t == "jreq":
             rq = {"room": ev.get("room"), "id": ev.get("user"), "name": ev.get("from", "?"),
                   "ts": ev.get("ts", time.time())}
@@ -4675,7 +4873,7 @@ class App(ctk.CTk):
             self.update_badges()
             self.rebuild_requests()
         elif t == "friend_req":
-            self.q_put(fmt("{who} sent you a friend request", who=ev.get("from")))
+            self.q_putf("{who} sent you a friend request", who=ev.get("from"))
             self.note_friend_req(ev.get("from", "?"))
             self.refresh_friends()
         elif t == "pm":
@@ -4683,17 +4881,17 @@ class App(ctk.CTk):
         elif t == "pm_own":
             self.pm_add(ev["to"], "You", ev["text"], ev.get("ts"), mine=True)
             if not ev.get("delivered"):
-                self.q_put(fmt("{who} is not online - your message was not delivered", who=ev["to"]))
+                self.q_putf("{who} is not online - your message was not delivered", who=ev["to"])
         elif t == "pm_err":
-            self.q_put(fmt("Chat failed: {err}", err=ev.get("err")))
+            self.q_putf("Chat failed: {err}", err=ev.get("err"))
         elif t == "search":
             self.show_search_results(ev.get("users", []))
         elif t == "ban_list":
             self.rebuild_bans(ev.get("bans", []))
         elif t == "invite":
             self.set_invite(ev)
-            self.q_put(fmt("{who} invited you to the room '{room}'",
-                       who=ev.get("from"), room=ev.get("room")))
+            self.q_putf("{who} invited you to the room '{room}'",
+                       who=ev.get("from"), room=ev.get("room"))
         elif t == "signed_elsewhere":
             if self.node:
                 self.leave()
@@ -4706,7 +4904,7 @@ class App(ctk.CTk):
         elif t == "link_down":
             if not self.link:
                 return        # already handled (logout / signed in elsewhere)
-            self.q_put(fmt("Connection to the server lost: {why}", why=ev.get("why", "")))
+            self.q_putf("Connection to the server lost: {why}", why=ev.get("why", ""))
             if self.node:
                 self.leave()
             if self.link:
@@ -4732,16 +4930,15 @@ class App(ctk.CTk):
                 txt = "Enter"
             setw(row["enter"], text=txt)
         if self.node and self.entering_rid:
-            setw(self.lbl_acct,
-                 text=fmt("entering '{room}' - preparing the virtual adapter...",
-                          room=self.room_name), text_color=YELLOW)
+            setf(self.lbl_acct, "entering '{room}' - preparing the virtual adapter...",
+                 {"room": self.room_name}, text_color=YELLOW)
         elif self.node:
-            setw(self.lbl_acct, text=fmt("inside '{room}' - the room stays connected",
-                                         room=self.room_name), text_color=ACC)
+            setf(self.lbl_acct, "inside '{room}' - the room stays connected",
+                 {"room": self.room_name}, text_color=ACC)
         elif self.err:
             setw(self.lbl_acct, text=self.err, text_color=RED)
         else:
-            setw(self.lbl_acct, text=fmt("{app} network online", app=APP_NAME), text_color=MUTED)
+            setf(self.lbl_acct, "{app} network online", {"app": APP_NAME}, text_color=MUTED)
         for b, t, in ((self.b_create, "Create room"), (self.b_join, "Join room")):
             setw(b, text=t, state="normal")
 
@@ -4795,8 +4992,9 @@ class App(ctk.CTk):
                                text=fmt("{who}   (you)", who=m.get("name", "?")) if mine
                                else m.get("name", "?"))
             name.pack(side="left")
-            rank = Label(who, text=rank_mark(role), font=(FONT, 11),
-                               text_color=(GOLD if role == "owner" else BLUE if role == "admin" else MUTED))
+            mgr = bool((m.get("perms") or {}).get("manage"))
+            rank = Label(who, text=rank_mark(role, mgr), font=(FONT, 11),
+                               text_color=rank_color(role, mgr))
             rank.pack(side="left", padx=(6, 0))
             if not mine:
                 if self.my_role() == "owner" or perms.get("kick"):
@@ -4813,6 +5011,18 @@ class App(ctk.CTk):
                 w.configure(cursor="hand2")
                 w.bind("<Button-1>", lambda e, q=pid: self.copy_peer_ip(q))
             self.rows[pid] = (r, name, info, ping, dot)
+        # the caption that waits for friends belongs under the roster. pack does not move a
+        # widget it already manages when you only change its padding, and the rows that used
+        # to hold it down there were just destroyed - so say plainly where it sits now.
+        # Without this the column reads "nobody here yet" first and the players after it.
+        if self.empty_on and self.rows:
+            self.empty.pack(pady=50, after=self.rows[list(self.rows)[-1]][0])
+        # and the list always starts at its top: rank order is read from the first line,
+        # not from wherever the last rebuild happened to leave the scroll
+        try:
+            self.plist._parent_canvas.yview_moveto(0)
+        except Exception:
+            pass
 
     def peer_vip(self, n, pid):
         """The virtual IP a player holds in this room - the roster is the authority."""
@@ -4837,12 +5047,13 @@ class App(ctk.CTk):
                 row[2].__dict__["_hold"] = time.time() + 1.6    # the line holds still, then
             except Exception:                                   # puts its IP back on its own
                 pass
-        self.q_put(fmt("{vip} copied - paste it into the game", vip=vip))
+        self.q_putf("{vip} copied - paste it into the game", vip=vip)
 
     def update_room(self, n):
         self.invite_text = n.room.get("invite") or self.invite_text   # the server keeps it fresh
         setw(self.lbl_you, text=fmt("{who}   ·   {vip}   ·   role: {r}",
-                                     who=with_rank(self.my_name, self.my_role()), vip=n.vip,
+                                     who=with_rank(self.my_name, self.my_role(), self.is_mgr()),
+                                     vip=n.vip,
                                      r=T(ROLE_BADGE.get(self.my_role(), ROLE_BADGE["member"])[0])))
         self.update_room_rows()
         mine_id = self.link.user["id"] if (self.link and self.link.user) else None

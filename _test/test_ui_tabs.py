@@ -34,6 +34,7 @@ class FakeLink:
         self.friends_payload = {"friends": [], "requests": []}
         self.admin_rows = []          # what the management console is shown
         self.rooms = []               # what my_rooms answers with
+        self.enter_room = None        # the room a management "enter room" hands back
         self.admin_ok = True
         self.pw = None                # what the server answers to a password change
 
@@ -44,6 +45,8 @@ class FakeLink:
         if t == "admin":
             if not self.admin_ok:
                 return {"t": t, "ok": False, "err": "This is not the management console"}
+            if str(kw.get("cmd", "")).startswith("enter room"):
+                return {"t": t, "ok": True, "room": self.enter_room}
             return {"t": t, "ok": True, "rows": list(self.admin_rows)}
         if t == "change_password":
             return dict(self.pw or {"t": t, "ok": True, "token": "a-brand-new-token"})
@@ -78,6 +81,7 @@ class FakeNode:
         self.room = room or {"id": rid, "name": name, "my_role": role, "members": []}
         self.rid, self.vip, self.running = self.room.get("id"), "10.77.0.7", True
         self.tx = self.rx = 0
+        self.srv_rtt = 0
         self.peers = {}
         self.started = self.stopped = False
 
@@ -891,6 +895,41 @@ def main():
     check("and only the second click says so to the server",
           any(t == "admin" and kw.get("cmd") == "remove room 5" for t, kw in app.link.sent),
           str(app.link.sent[-2:]))
+
+    # ---- and walking into a room the team does not own
+    mgr_room = {"id": 7, "name": "bob room", "code": "BBB", "pwd": "p", "key": "00",
+                "limit": 16, "my_role": "admin", "members": [],
+                "my_perms": {"kick": True, "ban": True, "unban": True, "limit": True,
+                             "approve": True, "invite": True, "manage": True}}
+    app.link.enter_room = mgr_room
+    real_node2, vp.VpsNode = vp.VpsNode, FakeNode
+    try:
+        sent_before = len(app.link.sent)
+        find(rows(app)[0], ctk.CTkButton, "Enter room")[0].invoke()
+        flush(app)
+        check("the room line can walk the team inside",
+              any(t == "admin" and kw.get("cmd") == "enter room 5"
+                  for t, kw in app.link.sent[sent_before:]),
+              str(app.link.sent[-2:]))
+        check("and the app takes that room up without a password",
+              bool(app.node) and app.node.rid == 7, str(app.node and app.node.rid))
+        app.show_page("room")
+        app.update_room(app.node)
+        check("inside, the badge says Management", str(app.lbl_role.cget("text")) == "Management",
+              str(app.lbl_role.cget("text")))
+        check("in red", str(app.lbl_role.cget("fg_color")) == vp.NAME_RED,
+              str(app.lbl_role.cget("fg_color")))
+        check("and their own line carries the red mark",
+              "(management)" in str(app.lbl_you.cget("text")), str(app.lbl_you.cget("text")))
+        check("every permission of the room is theirs",
+              all(app.my_perms().get(k) for k in ("kick", "ban", "unban", "limit",
+                                                  "approve", "invite")))
+    finally:
+        vp.VpsNode = real_node2
+        app.node, app.role_key, app.busy = None, None, False
+        app.link.enter_room = None
+        app.link.rooms = []
+        app.show_page("start")
 
     app.link.admin_rows = TRAFFIC
     app.set_admin_view("Traffic")
